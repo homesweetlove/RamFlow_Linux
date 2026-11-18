@@ -103,6 +103,8 @@ default) and *auto* (no list) — are interleaved over 3 rounds, in three layout
 ≈150 ms slice of the victim's work; alone, with no culprits, it takes 154–177 ms.
 Raw output: [`docs/evidence/2026-11-18-v0.2-effect/`](docs/evidence/2026-11-18-v0.2-effect/).
 
+Real Chrome study (5 paired blocks, search/sort p95 about 75–80 % lower, all raw data published; Korean): [`docs/REAL_CHROME_STUDY.ko.md`](docs/REAL_CHROME_STUDY.ko.md).
+
 **Culprits scattered over many sessions** (several unrelated apps or services — the case where plain `nice` fails)
 
 | Arm | Long job | vs. none | Short-burst p95 | Culprits' CPU |
