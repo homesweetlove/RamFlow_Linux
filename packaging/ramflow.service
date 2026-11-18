@@ -1,6 +1,6 @@
 [Unit]
 Description=RamFlow - foreground-first resource orchestrator
-Documentation=https://github.com/homesweetlove/RamFlow-Linux
+Documentation=https://github.com/homesweetlove/RamFlow_Linux
 After=multi-user.target
 
 [Service]

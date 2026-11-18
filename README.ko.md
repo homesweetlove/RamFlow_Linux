@@ -22,7 +22,7 @@
 러스트(cargo)가 있으면 됩니다. ([rustup.rs](https://rustup.rs))
 
 ```bash
-git clone https://github.com/homesweetlove/RamFlow-Linux
+git clone https://github.com/homesweetlove/RamFlow_Linux
 cd RamFlow-Linux
 cargo build --release
 sudo ./install.sh            # 서비스를 바로 켜려면: sudo ./install.sh --enable

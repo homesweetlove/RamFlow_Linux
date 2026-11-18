@@ -18,7 +18,7 @@ When the machine gets busy (CPU saturated, or memory stalling), RamFlow lowers t
 ## Install
 
 ```bash
-git clone https://github.com/homesweetlove/RamFlow-Linux && cd RamFlow-Linux
+git clone https://github.com/homesweetlove/RamFlow_Linux && cd RamFlow-Linux
 cargo build --release
 sudo ./install.sh            # add --enable to start the service right away
 ramflow doctor               # shows which features work on this machine
