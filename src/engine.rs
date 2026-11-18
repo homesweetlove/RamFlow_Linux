@@ -402,7 +402,7 @@ fn controller_cfg(cfg: &Config) -> ControllerCfg {
         start_level: 2.min(max_level),
         max_level,
         settle_ticks: (5000 / interval).max(3) as u32,
-        min_gain: 0.3,
+        min_gain: 0.2,
         // In dry-run nothing changes, so there is nothing to judge.
         effect_check: cfg.effect_check && !cfg.dry_run,
         retry_after_ms: cfg.retry_after_secs * 1000,
@@ -418,14 +418,11 @@ fn stall_percent(prev: (u64, u64), now: (u64, u64)) -> f64 {
     (busy_us / (dt_ms as f64 * 1000.0) * 100.0).clamp(0.0, 100.0)
 }
 
-/// Previous reading of the foreground, to turn counters into rates.
-#[derive(Debug, Clone, Copy)]
-struct FgPrev {
-    id: Identity,
-    wait_ns: u64,
-    ticks: u64,
-    ms: u64,
-}
+/// How many processes of the foreground's family are read for the wait measurement.
+const FAMILY_CAP: usize = 64;
+/// Foreground activity (percent of one core, run + wait) from which its wait ratio is taken at
+/// face value.
+const RELIABLE_ACTIVITY: f64 = 25.0;
 
 pub struct Engine<P: Provider> {
     cfg: Config,
@@ -439,7 +436,14 @@ pub struct Engine<P: Provider> {
     last_trim: HashMap<Identity, u64>,
     restore_failures: HashMap<Key, u32>,
     prev_psi: Option<(u64, u64)>,
-    fg_prev: Option<FgPrev>,
+    /// identity -> (wait ns, cpu ticks) of the foreground family at the previous sample
+    fam_prev: HashMap<Identity, (u64, u64)>,
+    fam_ms: u64,
+    /// `RAMFLOW_TRACE=1`: print one line per sample to stderr (for studies and bug reports).
+    trace: bool,
+    /// identity -> cpu ticks of the yield targets at the previous sample, and when
+    cul_prev: HashMap<Identity, u64>,
+    cul_ms: u64,
     hog_prev: HashMap<Identity, (u64, u64)>,
     /// identity -> (since ms, last cpu percent of one core)
     hog_since: HashMap<Identity, (u64, f64)>,
@@ -472,7 +476,11 @@ impl<P: Provider> Engine<P> {
             last_trim: HashMap::new(),
             restore_failures: HashMap::new(),
             prev_psi: None,
-            fg_prev: None,
+            fam_prev: HashMap::new(),
+            fam_ms: 0,
+            trace: std::env::var_os("RAMFLOW_TRACE").is_some(),
+            cul_prev: HashMap::new(),
+            cul_ms: 0,
             hog_prev: HashMap::new(),
             hog_since: HashMap::new(),
             hog_announced: HashSet::new(),
@@ -562,7 +570,7 @@ impl<P: Provider> Engine<P> {
             self.ctl.calm_tick();
             self.announced.clear();
             self.activity.clear();
-            self.fg_prev = None;
+            self.fam_prev.clear();
             self.hog_prev.clear();
             self.hog_since.clear();
             self.hog_announced.clear();
@@ -597,20 +605,31 @@ impl<P: Provider> Engine<P> {
 
         let targets =
             self.collect_targets(&procs, &protected, foreground.is_some(), now_ms, &mut ev);
-        let measure = self.measure(&procs, foreground, stall, snap.cpu_pct, now_ms);
+        let measure = self.measure(&procs, &protected, foreground, stall, snap.cpu_pct, now_ms);
 
         if self.ctl.level() == 0 && !self.journal.is_empty() {
             // Leftovers whose restore failed earlier: keep trying.
             self.restore_entries(&|_| true, &mut ev);
         }
 
+        let culprit_cpu = self.culprit_cpu(&targets, now_ms);
         let decision = self.ctl.step(&Input {
             now_ms,
             demand: measure.demand,
             activity: measure.activity,
             have_targets: !targets.is_empty() || !self.journal.is_empty(),
+            culprit_cpu,
         });
         let demand = self.ctl.demand();
+        if self.trace {
+            eprintln!(
+                "trace t={now_ms} demand_raw={:.1} demand_ema={demand:.1} activity={:.1} culprit_cpu={culprit_cpu:.1} level={} targets={} decision={decision:?}",
+                measure.demand,
+                measure.activity,
+                self.ctl.level(),
+                targets.len()
+            );
+        }
         match decision {
             Decision::Engage(level) => {
                 ev.push(Event::Engaged {
@@ -660,10 +679,31 @@ impl<P: Provider> Engine<P> {
         ev
     }
 
+    /// CPU the current targets use together (percent of one core), from the change in their
+    /// CPU ticks. Only programs seen in both samples count.
+    fn culprit_cpu(&mut self, targets: &[ProcessSample], now_ms: u64) -> f64 {
+        let cur: HashMap<Identity, u64> = targets.iter().map(|t| (t.identity(), t.ticks)).collect();
+        let prev = std::mem::replace(&mut self.cul_prev, cur.clone());
+        let prev_ms = std::mem::replace(&mut self.cul_ms, now_ms);
+        if prev.is_empty() || now_ms <= prev_ms {
+            return 0.0;
+        }
+        let d: u64 = cur
+            .iter()
+            .filter_map(|(id, &t)| prev.get(id).map(|&p| t.saturating_sub(p)))
+            .sum();
+        d as f64 / (sys::clock_ticks().max(1) as f64) * 1000.0 / (now_ms - prev_ms) as f64 * 100.0
+    }
+
     /// How much the protected side suffers, and how active it is.
+    ///
+    /// "The protected side" is the whole family of the foreground — the focused process, what it
+    /// started and its same-named peers. A browser does its work in renderer children, an
+    /// editor in helper processes; reading the focused process alone would miss them.
     fn measure(
         &mut self,
         procs: &[ProcessSample],
+        protected: &HashSet<i32>,
         foreground: Option<i32>,
         stall: f64,
         cpu_pct: f64,
@@ -674,22 +714,30 @@ impl<P: Provider> Engine<P> {
             activity: cpu_pct,
             source: Source::System,
         };
-        let Some(fg) = foreground.and_then(|pid| procs.iter().find(|p| p.pid == pid)) else {
-            self.fg_prev = None;
+        if foreground.is_none() || !procs.iter().any(|p| Some(p.pid) == foreground) {
+            self.fam_prev.clear();
             return fallback;
-        };
-        let Some(wait_ns) = self.provider.wait_ns(fg.pid) else {
-            self.fg_prev = None;
+        }
+        let mut family: Vec<&ProcessSample> = procs
+            .iter()
+            .filter(|p| protected.contains(&p.pid))
+            .collect();
+        family.sort_by_key(|p| (Some(p.pid) != foreground, p.pid));
+        family.truncate(FAMILY_CAP);
+
+        let mut cur: HashMap<Identity, (u64, u64)> = HashMap::new();
+        for p in &family {
+            if let Some(w) = self.provider.wait_ns(p.pid) {
+                cur.insert(p.identity(), (w, p.ticks));
+            }
+        }
+        if cur.is_empty() {
+            self.fam_prev.clear();
             return fallback;
-        };
-        let cur = FgPrev {
-            id: fg.identity(),
-            wait_ns,
-            ticks: fg.ticks,
-            ms: now_ms,
-        };
-        let prev = self.fg_prev.replace(cur);
-        let Some(prev) = prev.filter(|p| p.id == cur.id && cur.ms > p.ms) else {
+        }
+        let prev = std::mem::replace(&mut self.fam_prev, cur.clone());
+        let prev_ms = std::mem::replace(&mut self.fam_ms, now_ms);
+        if prev.is_empty() || now_ms <= prev_ms {
             // The foreground is known but this is its first reading: there is no rate yet.
             // Do not fall back to the machine-wide number — that would blame the culprits
             // without a victim.
@@ -698,19 +746,27 @@ impl<P: Provider> Engine<P> {
                 activity: cpu_pct,
                 source: Source::Foreground,
             };
-        };
-        let dt_ms = (cur.ms - prev.ms) as f64;
-        let wait = (cur.wait_ns.saturating_sub(prev.wait_ns) as f64) / (dt_ms * 1e6) * 100.0;
-        let run = (cur.ticks.saturating_sub(prev.ticks) as f64)
-            / (sys::clock_ticks().max(1) as f64)
-            * 1000.0
-            / dt_ms
-            * 100.0;
+        }
+        // Only processes seen in both samples contribute, so a helper that starts or exits
+        // cannot fake a rate.
+        let (mut d_wait, mut d_ticks) = (0u64, 0u64);
+        for (id, &(w, t)) in &cur {
+            if let Some(&(pw, pt)) = prev.get(id) {
+                d_wait += w.saturating_sub(pw);
+                d_ticks += t.saturating_sub(pt);
+            }
+        }
+        let dt_ms = (now_ms - prev_ms) as f64;
+        let wait = d_wait as f64 / (dt_ms * 1e6) * 100.0;
+        let run = d_ticks as f64 / (sys::clock_ticks().max(1) as f64) * 1000.0 / dt_ms * 100.0;
         let activity = wait + run;
         // The slowdown the foreground experiences: the share of its wanted CPU time it spent
         // waiting. Idle foregrounds suffer nothing, whatever the machine is doing.
+        // A ratio over very little activity is mostly noise (one short wait out of a few
+        // milliseconds of work reads as 100 %), so a foreground that barely did anything in
+        // this interval counts proportionally less.
         let demand = if activity >= 5.0 {
-            (wait / activity * 100.0).clamp(0.0, 100.0)
+            (wait / activity * 100.0).clamp(0.0, 100.0) * (activity / RELIABLE_ACTIVITY).min(1.0)
         } else {
             0.0
         };
@@ -1373,6 +1429,76 @@ mod tests {
         assert_eq!(distinct_levels(19), 4);
         assert_eq!(distinct_levels(12), 3);
         assert_eq!(distinct_levels(5), 1);
+    }
+
+    #[test]
+    fn the_foregrounds_helper_processes_are_the_victim_too() {
+        // A browser: the focused process is idle, its renderer child does the work and waits.
+        let mut m = scene(2);
+        let mut renderer = proc_(501, "terminal-helper", 0, 1);
+        renderer.ppid = FG;
+        m.procs.push(renderer);
+        m.waits.insert(501, 0);
+        let mut e = engine(cfg(), m);
+        let mut t = 0u64;
+        let clk = sys::clock_ticks() as f64;
+        let mut ev = vec![];
+        for _ in 0..3 {
+            t += 1000;
+            let m = e.provider_mut();
+            *m.waits.entry(501).or_insert(0) += (0.6e9) as u64;
+            m.procs.iter_mut().find(|p| p.pid == 501).unwrap().ticks += (0.4 * clk) as u64;
+            if let Some(p) = m.snap.cpu_psi.as_mut() {
+                p.some_total_us += 600_000;
+            }
+            ev.extend(e.tick(t));
+        }
+        assert!(
+            has(&ev, |x| matches!(
+                x,
+                Event::Engaged {
+                    source: Source::Foreground,
+                    ..
+                }
+            )),
+            "{ev:?}"
+        );
+        assert_eq!(e.provider().gn(2), 10);
+        assert_eq!(
+            e.provider().by(501).nice,
+            0,
+            "the helper itself is never lowered"
+        );
+    }
+
+    #[test]
+    fn a_foreground_that_barely_did_anything_cannot_read_as_suffering_100_percent() {
+        // 100 ms of waiting out of a 1 s interval and no CPU use: the ratio is 100 %, but
+        // it rests on one short wait; it counts in proportion to the activity (10 / 25).
+        let mut m = scene(2);
+        m.waits.insert(FG, 0);
+        let mut e = engine(cfg(), m);
+        let procs = e.provider_mut().scan();
+        let protected = protected_set(&procs, Some(FG));
+        e.measure(&procs, &protected, Some(FG), 0.0, 10.0, 1000);
+        *e.provider_mut().waits.entry(FG).or_insert(0) += 100_000_000;
+        let procs = e.provider_mut().scan();
+        let got = e.measure(&procs, &protected, Some(FG), 0.0, 10.0, 2000);
+        assert_eq!(got.source, Source::Foreground);
+        assert!((got.demand - 40.0).abs() < 1.0, "{}", got.demand);
+    }
+
+    #[test]
+    fn a_helper_that_appears_mid_way_does_not_fake_a_rate() {
+        let mut e = engine(cfg(), scene(2));
+        let mut t = 0;
+        run_seconds(&mut e, &mut t, 3, 0.0, 40.0, 60.0); // victim healthy, machine stalled
+        let mut late = proc_(502, "terminal-helper", 0, 1);
+        late.ppid = FG;
+        e.provider_mut().procs.push(late);
+        e.provider_mut().waits.insert(502, 5_000_000_000); // a large lifetime counter
+        let ev = run_seconds(&mut e, &mut t, 3, 0.0, 40.0, 60.0);
+        assert!(!has(&ev, |x| matches!(x, Event::Engaged { .. })), "{ev:?}");
     }
 
     #[test]

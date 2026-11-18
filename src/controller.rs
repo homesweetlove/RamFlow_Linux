@@ -34,6 +34,9 @@ pub struct ControllerCfg {
     pub retry_after_ms: u64,
 }
 
+/// Below this much culprit CPU the "they gave way" evidence is too weak to trust.
+const CULPRIT_MIN_CPU: f64 = 20.0;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Decision {
     Hold,
@@ -52,6 +55,9 @@ pub struct Input {
     pub activity: f64,
     /// Is there anything we could yield right now?
     pub have_targets: bool,
+    /// CPU the yielded programs use together (percent of one core). Lets the controller see
+    /// whether yielding really took CPU away from them.
+    pub culprit_cpu: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -60,11 +66,15 @@ pub struct Controller {
     level: u8,
     ema: Ema,
     in_streak: u32,
+    /// Sum of the raw demand readings of the current streak.
+    in_sum: f64,
     hi_streak: u32,
     lo_streak: u32,
     idle_streak: u32,
     ticks_at_max: u32,
     baseline: f64,
+    culprit_ema: Ema,
+    culprit_base: f64,
     cooldown_until_ms: u64,
 }
 
@@ -75,11 +85,14 @@ impl Controller {
             level: 0,
             ema: Ema::new(0.5),
             in_streak: 0,
+            in_sum: 0.0,
             hi_streak: 0,
             lo_streak: 0,
             idle_streak: 0,
             ticks_at_max: 0,
             baseline: 0.0,
+            culprit_ema: Ema::new(0.5),
+            culprit_base: 0.0,
             cooldown_until_ms: 0,
         }
     }
@@ -96,12 +109,14 @@ impl Controller {
     pub fn calm_tick(&mut self) {
         self.ema.update(0.0);
         self.in_streak = 0;
+        self.in_sum = 0.0;
     }
 
     /// Forget the engagement (the engine restored everything for another reason).
     pub fn reset(&mut self) {
         self.level = 0;
         self.in_streak = 0;
+        self.in_sum = 0.0;
         self.hi_streak = 0;
         self.lo_streak = 0;
         self.idle_streak = 0;
@@ -110,22 +125,30 @@ impl Controller {
 
     pub fn step(&mut self, i: &Input) -> Decision {
         let d = self.ema.update(i.demand);
+        let cul = self.culprit_ema.update(i.culprit_cpu);
         if self.level == 0 {
             if i.now_ms < self.cooldown_until_ms || !i.have_targets {
                 self.in_streak = 0;
+                self.in_sum = 0.0;
                 return Decision::Hold;
             }
             // Raw samples decide whether the suffering is sustained (a single spike must not
             // count twice just because the smoothed value decays slowly).
             if i.demand >= self.cfg.enter && d >= self.cfg.enter * 0.5 {
                 self.in_streak += 1;
+                self.in_sum += i.demand;
             } else {
                 self.in_streak = 0;
+                self.in_sum = 0.0;
             }
             if self.in_streak >= self.cfg.confirm {
+                // What the foreground suffered before we did anything: the readings that
+                // triggered the engagement (the smoothed value still carries the warm-up).
+                let before = self.in_sum / self.in_streak as f64;
                 self.reset();
                 self.level = self.cfg.start_level.clamp(1, self.cfg.max_level);
-                self.baseline = d;
+                self.baseline = before.max(d);
+                self.culprit_base = cul;
                 return Decision::Engage(self.level);
             }
             return Decision::Hold;
@@ -175,7 +198,12 @@ impl Controller {
             let judged = self.ticks_at_max >= self.cfg.settle_ticks;
             let still_bad = d >= self.cfg.high;
             let barely_better = d > self.baseline * (1.0 - self.cfg.min_gain);
-            if self.cfg.effect_check && judged && still_bad && barely_better {
+            // Yielding clearly takes CPU away from the culprits: they were competing, so the
+            // remaining wait comes from elsewhere (a browser's own threads, say). Keeping them
+            // lowered costs nothing and the foreground already got what yielding can give.
+            let culprits_yielded = self.culprit_base >= CULPRIT_MIN_CPU
+                && cul <= self.culprit_base * (1.0 - self.cfg.min_gain);
+            if self.cfg.effect_check && judged && still_bad && barely_better && !culprits_yielded {
                 self.reset();
                 self.cooldown_until_ms = i.now_ms + self.cfg.retry_after_ms;
                 return Decision::NoEffect;
@@ -214,6 +242,7 @@ mod tests {
             demand,
             activity: demand.max(50.0),
             have_targets: true,
+            culprit_cpu: 0.0,
         }
     }
 
@@ -275,6 +304,7 @@ mod tests {
                 demand: 2.0,
                 activity: 60.0,
                 have_targets: true,
+                culprit_cpu: 0.0,
             });
             if let Decision::SetLevel(l) = d {
                 seen.push(l);
@@ -304,6 +334,7 @@ mod tests {
                 demand: 0.0,
                 activity: 1.0,
                 have_targets: true,
+                culprit_cpu: 0.0,
             });
             released |= d == Decision::Release;
         }
@@ -372,6 +403,62 @@ mod tests {
         let ds = run(&mut c, 0, 60, 80.0);
         assert!(!ds.contains(&Decision::NoEffect));
         assert_eq!(c.level(), 4);
+    }
+
+    /// Feeds the controller: before engaging the culprits use `before` percent CPU, afterwards
+    /// `after`; the foreground keeps suffering at 80.
+    fn run_with_culprits(c: &mut Controller, before: f64, after: f64, secs: u64) -> Vec<Decision> {
+        let mut out = Vec::new();
+        for k in 0..secs {
+            let engaged = c.level() > 0;
+            out.push(c.step(&Input {
+                culprit_cpu: if engaged { after } else { before },
+                ..inp(k * 1000, 80.0)
+            }));
+        }
+        out
+    }
+
+    #[test]
+    fn keeps_yielding_when_the_culprits_clearly_gave_way() {
+        // The foreground still waits (its own threads compete), but the yielded programs lost
+        // most of their CPU: yielding works, so it is not withdrawn.
+        let mut c = Controller::new(cfg());
+        let ds = run_with_culprits(&mut c, 190.0, 30.0, 40);
+        assert!(!ds.contains(&Decision::NoEffect), "{ds:?}");
+        assert_eq!(c.level(), 4);
+    }
+
+    #[test]
+    fn withdraws_when_the_culprits_kept_their_cpu() {
+        let mut c = Controller::new(cfg());
+        let ds = run_with_culprits(&mut c, 190.0, 185.0, 40);
+        assert!(ds.contains(&Decision::NoEffect), "{ds:?}");
+    }
+
+    #[test]
+    fn faint_culprit_evidence_does_not_block_withdrawal() {
+        let mut c = Controller::new(cfg());
+        let ds = run_with_culprits(&mut c, 8.0, 0.0, 40);
+        assert!(ds.contains(&Decision::NoEffect), "{ds:?}");
+    }
+
+    #[test]
+    fn the_baseline_is_what_triggered_the_engagement_not_the_warm_up() {
+        // The smoothed value starts from the first (zero) reading and understates the real
+        // suffering; judging against it would call a real improvement "no effect".
+        let mut c = Controller::new(cfg());
+        let mut ds = vec![c.step(&inp(0, 0.0))];
+        for k in 1..=3 {
+            ds.push(c.step(&inp(k * 1000, 80.0)));
+        }
+        assert!(
+            ds.iter().any(|d| matches!(d, Decision::Engage(_))),
+            "{ds:?}"
+        );
+        // 80 -> 50 is a 37 % improvement (needed: 30 %), although 50 is still above "high".
+        let after = run(&mut c, 4000, 30, 50.0);
+        assert!(!after.contains(&Decision::NoEffect), "{after:?}");
     }
 
     #[test]

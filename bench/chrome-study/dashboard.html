@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>RamFlow study dashboard</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 12px; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { border-bottom: 1px solid #ddd; padding: 2px 8px; text-align: left; }
+</style>
+<input id="q" placeholder="group (g00 … g19)" autocomplete="off">
+<button id="sort">Sort by score</button>
+<span id="info"></span>
+<table><thead><tr><th>id</th><th>name</th><th>group</th><th>score</th></tr></thead><tbody id="rows"></tbody></table>
+<script>
+// A generated dashboard: 20,000 records, 20 groups. Searching a group rebuilds 1,000 DOM rows;
+// the sort button re-sorts them and rebuilds the rows. Pure function of the id, so the driver
+// can compute the expected result independently.
+const N = 20000;
+const score = id => (Math.imul(id, 2654435761) >>> 0) % 100000;
+const group = id => 'g' + String(id % 20).padStart(2, '0');
+const data = Array.from({ length: N }, (_, id) => ({ id, name: 'item-' + id, group: group(id), score: score(id) }));
+const rows = document.getElementById('rows');
+let current = data, dir = 0; // dir: 0 = by id, 1 = score desc, -1 = score asc
+
+function render() {
+  let html = '';
+  for (const r of current) {
+    html += '<tr><td>' + r.id + '</td><td>' + r.name + '</td><td>' + r.group + '</td><td>' + r.score + '</td></tr>';
+  }
+  rows.innerHTML = html;
+  document.getElementById('info').textContent = ' ' + current.length + ' rows';
+}
+function sorted(list) {
+  if (dir === 0) return list.slice().sort((a, b) => a.id - b.id);
+  return list.slice().sort((a, b) => (dir > 0 ? b.score - a.score : a.score - b.score) || a.id - b.id);
+}
+// Report "event → second animation frame" back to the driver.
+function afterFrames(kind, t0) {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    window.__done(JSON.stringify({ kind, inner: performance.now() - t0 }));
+  }));
+}
+document.getElementById('q').addEventListener('input', e => {
+  const t0 = performance.now();
+  const q = e.target.value.trim();
+  current = sorted(q ? data.filter(r => r.group === q) : data);
+  render();
+  afterFrames('search', t0);
+});
+document.getElementById('sort').addEventListener('click', () => {
+  const t0 = performance.now();
+  dir = dir === 1 ? -1 : 1;
+  current = sorted(current);
+  render();
+  afterFrames('sort', t0);
+});
+window.__state = () => ({
+  rows: rows.children.length,
+  first: rows.children.length ? +rows.firstElementChild.firstElementChild.textContent : null,
+  last: rows.children.length ? +rows.lastElementChild.firstElementChild.textContent : null,
+  dir,
+});
+window.__reset = () => { dir = 0; current = data; document.getElementById('q').value = ''; rows.innerHTML = ''; };
+</script>
