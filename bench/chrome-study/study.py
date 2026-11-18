@@ -29,10 +29,12 @@ ap.add_argument("--out", default=os.path.join(HERE, "out"))
 ap.add_argument("--bin", default=os.path.join(HERE, "..", "..", "target", "release", "ramflow"))
 ap.add_argument("--arms", default="off,on,auto,auto15")
 ap.add_argument("--n", type=int, default=30)
+ap.add_argument("--bg", type=int, default=8, help="number of background processes")
+ap.add_argument("--threads", type=int, default=2, help="threads per background process")
 args = ap.parse_args()
 BIN = os.path.abspath(args.bin)
 ARMS = args.arms.split(",")
-NBG, THREADS = 8, 2
+NBG, THREADS = args.bg, args.threads
 PY = os.path.realpath(shutil.which("python3"))
 CHROME = shutil.which("google-chrome") or shutil.which("chromium")
 PORT = 9411
