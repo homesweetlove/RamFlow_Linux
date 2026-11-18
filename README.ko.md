@@ -23,7 +23,7 @@
 
 ```bash
 git clone https://github.com/homesweetlove/RamFlow_Linux
-cd RamFlow-Linux
+cd RamFlow_Linux
 cargo build --release
 sudo ./install.sh            # 서비스를 바로 켜려면: sudo ./install.sh --enable
 ramflow doctor               # 이 컴퓨터에서 무엇이 되는지 점검
