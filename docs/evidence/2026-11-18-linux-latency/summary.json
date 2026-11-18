@@ -1,0 +1,22 @@
+{
+  "cores": 2,
+  "background_jobs": 4,
+  "rounds": 5,
+  "short_burst_ms_without": {
+    "p50": 1.4972230000012132,
+    "p95": 2.893150000005562,
+    "p99": 6.824059999985366
+  },
+  "short_burst_ms_with": {
+    "p50": 1.5062040000088928,
+    "p95": 2.589440999997805,
+    "p99": 4.953183999987232
+  },
+  "long_job_ms_without": 408.1618244999987,
+  "long_job_ms_with": 156.70902600000147,
+  "background_cores_used_without": 1.7387293226138243,
+  "background_cores_used_with": 1.6144910826443644,
+  "all_restored_on_sigterm": true,
+  "short_burst_p95_reduction_pct": 10.5,
+  "long_job_reduction_pct": 61.6
+}

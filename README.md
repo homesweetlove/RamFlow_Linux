@@ -80,7 +80,19 @@ Release build, measured on the 2-core / 8 GB / 68-process Linux box this was dev
 | Idle (2 s interval, 20 s) | 2.4 MiB resident · 0 CPU ticks · 1 thread |
 | Under 100 % CPU load, yielding (0.5 s interval, 20 s) | 2.4 MiB resident · 0.15 % CPU |
 
-The 45–49 % latency reduction in the Windows README was measured on Windows and **does not carry over**; no Linux latency benchmark exists yet.
+## Does it actually help?
+
+[`scripts/latency-bench.py`](scripts/latency-bench.py) measures a "foreground" Python probe while 4 CPU-bound background jobs (2× the cores) compete, alternating *without* / *with* RamFlow for 5 rounds each ([raw output](docs/evidence/2026-11-18-linux-latency/run.txt)). Medians:
+
+| Foreground work | Without | With | |
+|---|---:|---:|---|
+| Long job (≈ a build/render step, one slice) | 408 ms | 157 ms | **−62 %**, faster in all 5 rounds |
+| Short bursts (1.5 ms every 10 ms), p95 | 2.89 ms | 2.59 ms | within noise (single rounds ranged 2.5–5.5 ms) |
+| Short bursts, p50 | 1.50 ms | 1.51 ms | no change |
+
+So the benefit is real for **sustained foreground work that would otherwise share the CPU with background jobs**. For tiny, mostly-sleeping interactive tasks the Linux scheduler already favours sleepers, so there is little to gain — an earlier 3-round run showed −49 % on the short-burst p95 and this 5-round run −10 %, which is why that row is called noise. Everything was restored on `SIGTERM` in every round.
+
+Caveats: one 2-core VM, kernel 6.18, an extreme synthetic load, a Python probe — not a real browser or editor. Background jobs lose some throughput by design (1.74 → 1.61 of 2 cores were busy in the background). The 45–49 % figures in the Windows README were measured on Windows and do not carry over.
 
 ## Verification
 
