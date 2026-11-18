@@ -72,6 +72,8 @@ pub struct Controller {
     lo_streak: u32,
     idle_streak: u32,
     ticks_at_max: u32,
+    win_sum: f64,
+    judged: bool,
     baseline: f64,
     culprit_ema: Ema,
     culprit_base: f64,
@@ -90,6 +92,8 @@ impl Controller {
             lo_streak: 0,
             idle_streak: 0,
             ticks_at_max: 0,
+            win_sum: 0.0,
+            judged: false,
             baseline: 0.0,
             culprit_ema: Ema::new(0.5),
             culprit_base: 0.0,
@@ -121,6 +125,8 @@ impl Controller {
         self.lo_streak = 0;
         self.idle_streak = 0;
         self.ticks_at_max = 0;
+        self.win_sum = 0.0;
+        self.judged = false;
     }
 
     pub fn step(&mut self, i: &Input) -> Decision {
@@ -184,32 +190,40 @@ impl Controller {
             self.level += 1;
             self.hi_streak = 0;
             self.ticks_at_max = 0;
+            self.win_sum = 0.0;
+            self.judged = false;
             return Decision::SetLevel(self.level);
         }
         if self.lo_streak >= self.cfg.confirm * 2 && self.level > 1 {
             self.level -= 1;
             self.lo_streak = 0;
             self.ticks_at_max = 0;
+            self.win_sum = 0.0;
+            self.judged = false;
             return Decision::SetLevel(self.level);
         }
 
-        if self.level == self.cfg.max_level {
+        if self.level == self.cfg.max_level && !self.judged {
+            // One verdict per stay at the strongest level, from the average of a whole window
+            // of raw readings: a single noisy sample (or a lull at the end of a burst) must
+            // not decide, and once yielding has been judged useful it is not judged again.
             self.ticks_at_max += 1;
-            let judged = self.ticks_at_max >= self.cfg.settle_ticks;
-            let still_bad = d >= self.cfg.high;
-            let barely_better = d > self.baseline * (1.0 - self.cfg.min_gain);
-            // Yielding clearly takes CPU away from the culprits: they were competing, so the
-            // remaining wait comes from elsewhere (a browser's own threads, say). Keeping them
-            // lowered costs nothing and the foreground already got what yielding can give.
-            let culprits_yielded = self.culprit_base >= CULPRIT_MIN_CPU
-                && cul <= self.culprit_base * (1.0 - self.cfg.min_gain);
-            if self.cfg.effect_check && judged && still_bad && barely_better && !culprits_yielded {
-                self.reset();
-                self.cooldown_until_ms = i.now_ms + self.cfg.retry_after_ms;
-                return Decision::NoEffect;
+            self.win_sum += i.demand;
+            if self.ticks_at_max >= self.cfg.settle_ticks {
+                self.judged = true;
+                let mean = self.win_sum / self.ticks_at_max as f64;
+                let still_bad = mean >= self.cfg.high;
+                let barely_better = mean > self.baseline * (1.0 - self.cfg.min_gain);
+                // Yielding clearly takes CPU away from the culprits: they were competing, so
+                // the remaining wait comes from elsewhere (a browser's own threads, say).
+                let culprits_yielded = self.culprit_base >= CULPRIT_MIN_CPU
+                    && cul <= self.culprit_base * (1.0 - self.cfg.min_gain);
+                if self.cfg.effect_check && still_bad && barely_better && !culprits_yielded {
+                    self.reset();
+                    self.cooldown_until_ms = i.now_ms + self.cfg.retry_after_ms;
+                    return Decision::NoEffect;
+                }
             }
-        } else {
-            self.ticks_at_max = 0;
         }
         Decision::Hold
     }
@@ -459,6 +473,30 @@ mod tests {
         // 80 -> 50 is a 37 % improvement (needed: 30 %), although 50 is still above "high".
         let after = run(&mut c, 4000, 30, 50.0);
         assert!(!after.contains(&Decision::NoEffect), "{after:?}");
+    }
+
+    #[test]
+    fn a_verdict_is_given_once_and_a_later_lull_does_not_undo_it() {
+        let mut c = Controller::new(cfg());
+        run(&mut c, 0, 3, 80.0);
+        // yielding helped (80 -> 40) ...
+        let ds = run(&mut c, 3000, 30, 40.0);
+        assert!(!ds.contains(&Decision::NoEffect), "{ds:?}");
+        // ... so a burst of bad readings afterwards (a different phase of the work) is not
+        // judged against the yielding again.
+        let ds = run(&mut c, 40_000, 30, 95.0);
+        assert!(!ds.contains(&Decision::NoEffect), "{ds:?}");
+        assert_eq!(c.level(), 4);
+    }
+
+    #[test]
+    fn one_noisy_sample_in_the_window_does_not_decide() {
+        let mut c = Controller::new(cfg());
+        run(&mut c, 0, 3, 80.0);
+        let mut ds = run(&mut c, 3000, 8, 36.0); // improving, reaches the top level
+        ds.extend(run(&mut c, 11_000, 1, 100.0)); // one spike
+        ds.extend(run(&mut c, 12_000, 20, 36.0));
+        assert!(!ds.contains(&Decision::NoEffect), "{ds:?}");
     }
 
     #[test]
