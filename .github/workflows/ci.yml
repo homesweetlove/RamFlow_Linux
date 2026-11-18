@@ -1,0 +1,39 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Unit tests and unprivileged paths
+        run: cargo test
+      - name: Real-process tests as root (priority changes, crash recovery, SIGTERM restore)
+        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --test live --test cli
+      - name: Release build
+        run: cargo build --release
+      - name: Service file is valid
+        run: |
+          sed "s#/usr/local/bin/ramflow#$PWD/target/release/ramflow#" packaging/ramflow.service > /tmp/ramflow.service
+          systemd-analyze verify /tmp/ramflow.service
+      - name: Installer round trip
+        run: |
+          T=$(mktemp -d)
+          PREFIX_OVERRIDE_OK=1 NO_SYSTEMCTL=1 PREFIX=$T/usr SYSCONFDIR=$T/etc UNITDIR=$T/units ./install.sh
+          $T/usr/bin/ramflow version
+          NO_SYSTEMCTL=1 PREFIX=$T/usr SYSCONFDIR=$T/etc UNITDIR=$T/units STATEDIR=$T/state ./uninstall.sh --purge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ramflow-linux-x86_64
+          path: target/release/ramflow
