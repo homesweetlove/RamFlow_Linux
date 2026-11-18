@@ -15,6 +15,10 @@ pub struct Ema {
 }
 
 impl Ema {
+    pub fn value(&self) -> Option<f64> {
+        self.value
+    }
+
     pub fn new(alpha: f64) -> Self {
         Ema {
             alpha: alpha.clamp(0.01, 1.0),
@@ -126,52 +130,33 @@ pub fn memory_pressure(s: &Signals) -> f64 {
     (score / weight).clamp(0.0, 100.0)
 }
 
-/// What the policy concluded for one sample.
+/// What the memory policy concluded for one sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Pressure {
-    pub cpu: f64,
-    pub memory: f64,
-    pub cpu_busy: bool,
-    pub memory_tight: bool,
+pub struct MemoryState {
+    pub score: f64,
     pub critical: bool,
 }
 
-impl Pressure {
-    /// Anything worth yielding background work for.
-    pub fn contention(&self) -> bool {
-        self.cpu_busy || self.memory_tight || self.critical
-    }
-}
-
+/// Smooths the memory score and decides when memory is *critical*.
 #[derive(Debug, Clone)]
-pub struct PressureTracker {
-    cpu_ema: Ema,
-    mem_ema: Ema,
-    cpu_h: Hysteresis,
-    mem_h: Hysteresis,
-    crit_h: Hysteresis,
+pub struct MemoryTracker {
+    ema: Ema,
+    crit: Hysteresis,
 }
 
-impl PressureTracker {
+impl MemoryTracker {
     pub fn new(c: &Config) -> Self {
-        PressureTracker {
-            cpu_ema: Ema::new(0.4),
-            mem_ema: Ema::new(0.4),
-            cpu_h: Hysteresis::new(c.cpu_enter, c.cpu_leave, c.confirm),
-            mem_h: Hysteresis::new(c.mem_enter, c.mem_leave, c.confirm),
-            crit_h: Hysteresis::new(c.critical_enter, c.critical_leave, c.confirm),
+        MemoryTracker {
+            ema: Ema::new(0.4),
+            crit: Hysteresis::new(c.critical_enter, c.critical_leave, c.confirm),
         }
     }
 
-    pub fn update(&mut self, cpu_pct: f64, signals: &Signals) -> Pressure {
-        let cpu = self.cpu_ema.update(cpu_pct);
-        let memory = self.mem_ema.update(memory_pressure(signals));
-        Pressure {
-            cpu,
-            memory,
-            cpu_busy: self.cpu_h.update(cpu),
-            memory_tight: self.mem_h.update(memory),
-            critical: self.crit_h.update(memory),
+    pub fn update(&mut self, signals: &Signals) -> MemoryState {
+        let score = self.ema.update(memory_pressure(signals));
+        MemoryState {
+            score,
+            critical: self.crit.update(score),
         }
     }
 }
@@ -293,45 +278,26 @@ mod tests {
     }
 
     #[test]
-    fn tracker_reports_contention_only_after_confirmation() {
+    fn memory_exhaustion_is_critical_only_after_confirmation() {
         let c = Config::default(); // confirm = 3
-        let mut t = PressureTracker::new(&c);
-        let calm = Signals {
-            available_pct: 80.0,
-            ..Default::default()
-        };
-        let mut busy_seen = false;
-        for i in 0..6 {
-            let p = t.update(95.0, &calm);
-            if i < 2 {
-                assert!(!p.contention(), "sample {i} must not trigger yet");
-            }
-            busy_seen |= p.cpu_busy;
-        }
-        assert!(busy_seen);
-        // And it releases again when the load goes away.
-        let mut still = true;
-        for _ in 0..12 {
-            still = t.update(5.0, &calm).cpu_busy;
-        }
-        assert!(!still);
-    }
-
-    #[test]
-    fn memory_exhaustion_is_critical() {
-        let c = Config::default();
-        let mut t = PressureTracker::new(&c);
+        let mut t = MemoryTracker::new(&c);
         let dire = Signals {
             available_pct: 1.0,
             psi_some10: Some(50.0),
             psi_full10: Some(30.0),
             swap_used_pct: Some(95.0),
         };
-        let mut p = t.update(10.0, &dire);
-        for _ in 0..4 {
-            p = t.update(10.0, &dire);
+        assert!(!t.update(&dire).critical);
+        assert!(!t.update(&dire).critical);
+        assert!(t.update(&dire).critical);
+        let calm = Signals {
+            available_pct: 80.0,
+            ..Default::default()
+        };
+        let mut still = true;
+        for _ in 0..12 {
+            still = t.update(&calm).critical;
         }
-        assert!(p.critical && p.memory_tight && p.contention());
-        assert!(!p.cpu_busy);
+        assert!(!still, "and it recovers");
     }
 }

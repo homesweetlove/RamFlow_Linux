@@ -57,6 +57,22 @@ fn run(cmd: &mut Command, timeout: Duration) -> Option<String> {
     }
 }
 
+/// The first whitespace-separated token of a command's output, if it is a positive pid.
+/// This is the contract for `foreground_cmd`, which is how Wayland compositors plug in:
+/// `swaymsg -t get_tree | jq '.. | select(.focused?) | .pid'`, `hyprctl activewindow -j | jq .pid`, …
+pub fn parse_pid_output(out: &str) -> Option<i32> {
+    let pid: i32 = out.split_whitespace().next()?.parse().ok()?;
+    (pid > 1).then_some(pid)
+}
+
+/// Run a user-supplied shell command and read a pid from its output (1 s time limit).
+pub fn pid_from_command(cmd: &str) -> Option<i32> {
+    parse_pid_output(&run(
+        Command::new("sh").arg("-c").arg(cmd),
+        Duration::from_secs(1),
+    )?)
+}
+
 #[derive(Debug, Clone)]
 pub struct X11Foreground {
     display: String,
@@ -125,6 +141,37 @@ mod tests {
             None
         );
         assert_eq!(parse_active_window("window id # banana"), None);
+    }
+
+    #[test]
+    fn pid_output_contract() {
+        assert_eq!(parse_pid_output("1234\n"), Some(1234));
+        assert_eq!(parse_pid_output("  77 firefox\n"), Some(77));
+        assert_eq!(parse_pid_output("null\n"), None);
+        assert_eq!(parse_pid_output(""), None);
+        assert_eq!(parse_pid_output("0"), None);
+        assert_eq!(
+            parse_pid_output("1"),
+            None,
+            "pid 1 is never a foreground app"
+        );
+        assert_eq!(parse_pid_output("-5"), None);
+    }
+
+    #[test]
+    fn command_source_works_and_fails_safe() {
+        assert_eq!(pid_from_command("echo 4242"), Some(4242));
+        assert_eq!(pid_from_command("printf '%s\\n' 99 extra"), Some(99));
+        assert_eq!(pid_from_command("echo nothing-useful"), None);
+        assert_eq!(pid_from_command("exit 3"), None);
+        assert_eq!(
+            pid_from_command("echo 5; exit 1"),
+            None,
+            "a failing command is not trusted"
+        );
+        let t = Instant::now();
+        assert_eq!(pid_from_command("sleep 5; echo 7"), None);
+        assert!(t.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

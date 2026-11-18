@@ -45,6 +45,22 @@ pub fn can_run_live() -> bool {
 /// Start `python3 -c code` under a unique name (a symlink to the interpreter), so its kernel
 /// `comm` is unique and nothing else on the machine can match it.
 pub fn spawn_python(code: &str) -> Spawned {
+    spawn_python_in(code, false)
+}
+
+/// Like [`spawn_python`], but the child starts its own session (setsid), which on a kernel with
+/// scheduler autogroups also gives it its own autogroup — like a job started from another
+/// terminal tab.
+pub fn spawn_python_session(code: &str) -> Spawned {
+    spawn_python_in(code, true)
+}
+
+extern "C" {
+    fn setsid() -> i32;
+}
+
+fn spawn_python_in(code: &str, new_session: bool) -> Spawned {
+    use std::os::unix::process::CommandExt;
     let py = std::fs::canonicalize(find_in_path("python3").expect("python3")).unwrap();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let comm = format!("rfl{}x{}", std::process::id() % 100000, n);
@@ -53,14 +69,22 @@ pub fn spawn_python(code: &str) -> Spawned {
     std::fs::create_dir_all(&dir).unwrap();
     let link = dir.join(&comm);
     std::os::unix::fs::symlink(&py, &link).unwrap();
-    let child = Command::new(&link)
-        .arg("-c")
+    let mut cmd = Command::new(&link);
+    cmd.arg("-c")
         .arg(code)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn");
+        .stderr(Stdio::null());
+    if new_session {
+        // SAFETY: setsid is async-signal-safe and touches no memory of ours.
+        unsafe {
+            cmd.pre_exec(|| {
+                setsid();
+                Ok(())
+            });
+        }
+    }
+    let child = cmd.spawn().expect("spawn");
     Spawned { child, comm, dir }
 }
 

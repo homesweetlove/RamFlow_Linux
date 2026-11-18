@@ -9,6 +9,7 @@
 //! There are no third-party dependencies.
 
 pub mod config;
+pub mod controller;
 pub mod engine;
 pub mod fmt;
 pub mod foreground;

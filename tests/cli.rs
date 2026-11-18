@@ -108,8 +108,15 @@ fn nice_of(pid: i32) -> Option<i32> {
     Proc::new().process(pid).map(|p| p.nice)
 }
 
-fn write_config(dir: &Path, targets: &[&Spawned]) -> std::path::PathBuf {
-    let mut c = String::from("dry_run = false\ninterval_ms = 200\nconfirm = 2\ncpu_enter = 55\ncpu_leave = 30\nnice_target = 15\n");
+/// The work is split into culprits (listed, hogging the CPU) and a victim (the "foreground":
+/// also CPU-bound, so it really does wait for a CPU while the culprits run).
+fn write_config(dir: &Path, targets: &[&Spawned], victim: &Spawned) -> std::path::PathBuf {
+    let fgfile = dir.join("fg");
+    std::fs::write(&fgfile, format!("{}\n", victim.pid())).unwrap();
+    let mut c = format!(
+        "dry_run = false\ninterval_ms = 200\nconfirm = 2\nuse_autogroup = false\nforeground_cmd = cat {}\n",
+        fgfile.display()
+    );
     for t in targets {
         c.push_str(&format!("yield = comm:{}\n", t.comm));
     }
@@ -141,11 +148,13 @@ fn start_daemon(conf: &Path, state: &Path) -> Daemon {
     )
 }
 
-fn saturate() -> Vec<Spawned> {
+/// Twice as many CPU hogs as cores, plus one victim that competes with them.
+fn saturate() -> (Vec<Spawned>, Spawned) {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
-    (0..n).map(|_| spawn_python(BUSY_LOOP)).collect()
+    let jobs = (0..n * 2).map(|_| spawn_python(BUSY_LOOP)).collect();
+    (jobs, spawn_python(BUSY_LOOP))
 }
 
 #[test]
@@ -154,19 +163,22 @@ fn real_load_gets_lowered_and_sigterm_restores_everything() {
         eprintln!("skipped: needs root/CAP_SYS_NICE and python3");
         return;
     }
-    let jobs = saturate();
+    let (jobs, victim) = saturate();
     let refs: Vec<&Spawned> = jobs.iter().collect();
     let d = tmpdir("e2e-term");
-    let conf = write_config(&d, &refs);
+    let conf = write_config(&d, &refs, &victim);
     let mut daemon = start_daemon(&conf, &d);
 
     assert!(
-        wait_until(Duration::from_secs(30), || jobs.iter().all(|j| nice_of(
-            j.pid()
-        ) == Some(
-            15
-        ))),
-        "background jobs hogging the CPU should be lowered to nice 15"
+        wait_until(Duration::from_secs(30), || jobs
+            .iter()
+            .all(|j| nice_of(j.pid()) > Some(0))),
+        "the culprits should be lowered once the victim suffers"
+    );
+    assert_eq!(
+        nice_of(victim.pid()),
+        Some(0),
+        "the victim itself is never lowered"
     );
     assert!(d.join("journal").exists());
 
@@ -189,20 +201,20 @@ fn kill_dash_nine_is_recovered_by_restore() {
         eprintln!("skipped: needs root/CAP_SYS_NICE and python3");
         return;
     }
-    let jobs = saturate();
+    let (jobs, victim) = saturate();
     let refs: Vec<&Spawned> = jobs.iter().collect();
     let d = tmpdir("e2e-kill");
-    let conf = write_config(&d, &refs);
+    let conf = write_config(&d, &refs, &victim);
     let mut daemon = start_daemon(&conf, &d);
     assert!(wait_until(Duration::from_secs(30), || jobs
         .iter()
-        .all(|j| nice_of(j.pid()) == Some(15))));
+        .all(|j| nice_of(j.pid()) > Some(0))));
 
     // Hard kill: nothing gets a chance to clean up.
     daemon.0.kill().unwrap();
     daemon.0.wait().unwrap();
     assert!(
-        jobs.iter().all(|j| nice_of(j.pid()) == Some(15)),
+        jobs.iter().all(|j| nice_of(j.pid()) > Some(0)),
         "left lowered by the crash"
     );
     assert!(d.join("journal").exists());
@@ -225,10 +237,10 @@ fn dry_run_daemon_leaves_real_load_alone() {
         eprintln!("skipped: needs root/CAP_SYS_NICE and python3");
         return;
     }
-    let jobs = saturate();
+    let (jobs, victim) = saturate();
     let refs: Vec<&Spawned> = jobs.iter().collect();
     let d = tmpdir("e2e-dry");
-    let conf = write_config(&d, &refs);
+    let conf = write_config(&d, &refs, &victim);
     let text_conf = std::fs::read_to_string(&conf)
         .unwrap()
         .replace("dry_run = false", "dry_run = true");
@@ -244,7 +256,7 @@ fn dry_run_daemon_leaves_real_load_alone() {
             .spawn()
             .unwrap(),
     );
-    std::thread::sleep(Duration::from_secs(4));
+    std::thread::sleep(Duration::from_secs(6));
     Command::new("kill")
         .args(["-TERM", &daemon.0.id().to_string()])
         .status()

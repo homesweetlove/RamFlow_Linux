@@ -90,6 +90,36 @@ pub fn cap_effective_has(status: &str, bit: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// Is the kernel's scheduler autogroup (per-session CPU grouping) switched on?
+pub fn autogroup_enabled() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/sched_autogroup_enabled")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Set the nice value of the whole autogroup `pid` belongs to (affects every process in that
+/// session). The kernel may answer `EAGAIN` when writes come too fast; retry a few times.
+pub fn set_autogroup_nice(pid: i32, nice: i32) -> io::Result<()> {
+    use std::io::Write;
+    let path = format!("/proc/{pid}/autogroup");
+    let mut last = io::Error::other("unreachable");
+    for attempt in 0..4 {
+        let r = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|mut f| f.write_all(format!("{nice}\n").as_bytes()));
+        match r {
+            Ok(()) => return Ok(()),
+            Err(e) if e.raw_os_error() == Some(11) && attempt < 3 => {
+                last = e;
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
 /// Can this process lower a nice value again (i.e. can it undo what it does)?
 pub fn can_restore_priority() -> bool {
     if effective_uid() == 0 {
@@ -157,6 +187,16 @@ pub fn install_shutdown_handlers() {
         signal(SIGINT, handler);
         signal(SIGTERM, handler);
         signal(SIGHUP, handler);
+    }
+}
+
+/// For one-shot commands whose output may be cut short (`ramflow blame | head`): end quietly
+/// when the reader goes away. Not used by the daemon, which must survive and clean up.
+pub fn quiet_on_closed_pipe() {
+    const SIGPIPE: c_int = 13;
+    const SIG_DFL: usize = 0;
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
     }
 }
 

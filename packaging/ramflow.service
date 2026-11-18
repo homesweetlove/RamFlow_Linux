@@ -13,8 +13,12 @@ Restart=on-failure
 RestartSec=5
 StateDirectory=ramflow
 
-# Only what is needed: lowering/raising priorities and reading other processes' details.
-CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_PTRACE
+# Only what is needed:
+#   CAP_SYS_NICE      lower/raise priorities
+#   CAP_SYS_PTRACE    read other processes' details
+#   CAP_DAC_OVERRIDE  write another user's /proc/<pid>/autogroup (lowering a whole session);
+#                     without it RamFlow falls back to lowering single processes
+CapabilityBoundingSet=CAP_SYS_NICE CAP_SYS_PTRACE CAP_DAC_OVERRIDE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only

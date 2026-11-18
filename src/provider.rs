@@ -4,7 +4,7 @@
 //! and tests implement it with an in-memory fake.
 
 use crate::config::Config;
-use crate::foreground::X11Foreground;
+use crate::foreground::{pid_from_command, X11Foreground};
 use crate::proc::{cpu_percent, parse_pageout_ranges, CpuTimes, MemInfo, Proc, ProcessSample, Psi};
 use crate::sys;
 use std::io;
@@ -13,6 +13,8 @@ use std::io;
 pub struct Snapshot {
     pub mem: MemInfo,
     pub mem_psi: Option<Psi>,
+    /// System-wide CPU pressure. `some_total_us` is a cumulative counter.
+    pub cpu_psi: Option<Psi>,
     pub cpu_pct: f64,
 }
 
@@ -30,30 +32,53 @@ pub trait Provider {
     /// Undo [`Provider::set_nice`]: move every thread that is still at `applied` back to
     /// `original`, leaving threads that were changed by someone else alone.
     fn restore_nice(&mut self, pid: i32, applied: i32, original: i32) -> io::Result<()>;
+    /// (autogroup id, autogroup nice) of the session `pid` belongs to; `None` when the kernel
+    /// has no (enabled) autogroup.
+    fn autogroup(&self, pid: i32) -> Option<(u64, i32)>;
+    /// Set the nice value of the whole session `pid` belongs to.
+    fn set_autogroup_nice(&mut self, pid: i32, nice: i32) -> io::Result<()>;
+    /// Total time (ns) the process's threads spent runnable but waiting for a CPU.
+    fn wait_ns(&self, pid: i32) -> Option<u64>;
     /// Ask the kernel to reclaim the process's idle anonymous memory. Returns bytes accepted.
     fn page_out(&mut self, pid: i32) -> io::Result<u64>;
     fn boot_id(&self) -> String;
 }
 
+enum ForegroundSource {
+    X11(X11Foreground),
+    Command(String),
+}
+
 pub struct LinuxProvider {
     proc: Proc,
     prev_cpu: Option<CpuTimes>,
-    x11: Option<X11Foreground>,
+    fg: Option<ForegroundSource>,
+    autogroup_on: bool,
 }
 
 impl LinuxProvider {
     pub fn new(cfg: &Config) -> Self {
         let proc = Proc::new();
         let prev_cpu = proc.cpu_times();
+        let fg = match &cfg.foreground_cmd {
+            Some(cmd) => Some(ForegroundSource::Command(cmd.clone())),
+            None => X11Foreground::detect(cfg.x_display.as_deref(), cfg.x_authority.as_deref())
+                .map(ForegroundSource::X11),
+        };
         LinuxProvider {
             proc,
             prev_cpu,
-            x11: X11Foreground::detect(cfg.x_display.as_deref(), cfg.x_authority.as_deref()),
+            fg,
+            autogroup_on: sys::autogroup_enabled(),
         }
     }
 
     pub fn has_foreground_source(&self) -> bool {
-        self.x11.is_some()
+        self.fg.is_some()
+    }
+
+    pub fn autogroup_enabled(&self) -> bool {
+        self.autogroup_on
     }
 
     pub fn proc(&self) -> &Proc {
@@ -76,20 +101,32 @@ impl Provider for LinuxProvider {
         Ok(Snapshot {
             mem,
             mem_psi: self.proc.psi("memory"),
+            cpu_psi: self.proc.psi("cpu"),
             cpu_pct,
         })
     }
 
     fn scan(&mut self) -> Vec<ProcessSample> {
+        let on = self.autogroup_on;
         self.proc
             .pids()
             .into_iter()
             .filter_map(|p| self.proc.process(p))
+            .map(|mut s| {
+                if !on {
+                    s.autogroup = 0;
+                }
+                s
+            })
             .collect()
     }
 
     fn read(&self, pid: i32) -> Option<ProcessSample> {
-        self.proc.process(pid)
+        let mut s = self.proc.process(pid)?;
+        if !self.autogroup_on {
+            s.autogroup = 0;
+        }
+        Some(s)
     }
 
     fn exe(&self, pid: i32) -> Option<String> {
@@ -97,7 +134,10 @@ impl Provider for LinuxProvider {
     }
 
     fn foreground(&mut self) -> Option<i32> {
-        self.x11.as_ref()?.active_pid()
+        match self.fg.as_ref()? {
+            ForegroundSource::X11(x) => x.active_pid(),
+            ForegroundSource::Command(c) => pid_from_command(c),
+        }
     }
 
     fn set_nice(&mut self, pid: i32, nice: i32) -> io::Result<()> {
@@ -126,6 +166,21 @@ impl Provider for LinuxProvider {
             }
         }
         main_result
+    }
+
+    fn autogroup(&self, pid: i32) -> Option<(u64, i32)> {
+        if !self.autogroup_on {
+            return None;
+        }
+        self.proc.autogroup(pid)
+    }
+
+    fn set_autogroup_nice(&mut self, pid: i32, nice: i32) -> io::Result<()> {
+        sys::set_autogroup_nice(pid, nice)
+    }
+
+    fn wait_ns(&self, pid: i32) -> Option<u64> {
+        self.proc.wait_ns(pid)
     }
 
     fn page_out(&mut self, pid: i32) -> io::Result<u64> {

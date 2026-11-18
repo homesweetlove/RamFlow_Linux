@@ -1,6 +1,6 @@
 [package]
 name = "ramflow"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Foreground-first resource orchestrator for Linux: yields background work under pressure and always restores what it changed."

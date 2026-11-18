@@ -75,12 +75,40 @@ pub struct Config {
     pub yield_list: Vec<Matcher>,
     /// Extra processes that must never be touched (on top of the built-in list).
     pub protect: Vec<Matcher>,
-    /// Nice value background jobs are moved to (1..=19).
+    /// The strongest nice value background jobs are moved to (1..=19).
     pub nice_target: i32,
-    pub cpu_enter: f64,
-    pub cpu_leave: f64,
-    pub mem_enter: f64,
-    pub mem_leave: f64,
+    /// Lower the priority of a whole session (scheduler autogroup) when the job runs in a
+    /// different session than the foreground. Per-process nice alone has little effect across
+    /// sessions on kernels with autogroup.
+    pub use_autogroup: bool,
+    /// Find CPU hogs automatically instead of relying only on `yield`.
+    pub auto: bool,
+    /// A process is a hog above this share of one core (percent) …
+    pub auto_hog_cpu: f64,
+    /// … sustained for this many seconds.
+    pub auto_hog_secs: u64,
+    /// Auto mode never touches processes of users below this uid (system accounts).
+    pub auto_min_uid: u32,
+    /// Shell command that prints the pid of the focused window's process (for Wayland etc.).
+    pub foreground_cmd: Option<String>,
+    /// Cheap pre-check: nothing is examined until the system-wide CPU stall rate (percent)
+    /// reaches this.
+    pub stall_gate: f64,
+    /// How much the foreground suffers (percent of its time waiting for a CPU) before RamFlow
+    /// engages …
+    pub demand_enter: f64,
+    /// … raises the yielding level …
+    pub demand_high: f64,
+    /// … and lowers it again.
+    pub demand_low: f64,
+    /// Release everything when the foreground's activity stays below this percent …
+    pub release_below: f64,
+    /// … for this many seconds.
+    pub release_secs: u64,
+    /// Withdraw the action if it did not reduce the suffering.
+    pub effect_check: bool,
+    /// After a withdrawal wait this long before trying again.
+    pub retry_after_secs: u64,
     pub critical_enter: f64,
     pub critical_leave: f64,
     /// Consecutive samples required to enter or leave a state.
@@ -102,11 +130,21 @@ impl Default for Config {
             interval_ms: 2000,
             yield_list: Vec::new(),
             protect: Vec::new(),
-            nice_target: 15,
-            cpu_enter: 80.0,
-            cpu_leave: 60.0,
-            mem_enter: 55.0,
-            mem_leave: 35.0,
+            nice_target: 19,
+            use_autogroup: true,
+            auto: false,
+            auto_hog_cpu: 35.0,
+            auto_hog_secs: 5,
+            auto_min_uid: 1000,
+            foreground_cmd: None,
+            stall_gate: 10.0,
+            demand_enter: 20.0,
+            demand_high: 35.0,
+            demand_low: 10.0,
+            release_below: 5.0,
+            release_secs: 10,
+            effect_check: true,
+            retry_after_secs: 120,
             critical_enter: 80.0,
             critical_leave: 60.0,
             confirm: 3,
@@ -200,16 +238,46 @@ impl Config {
                         err(format!("trim_idle: true/false 가 필요합니다 ('{value}')"))
                     })?
                 }
+                "use_autogroup" => {
+                    c.use_autogroup = parse_bool(value).ok_or_else(|| {
+                        err(format!(
+                            "use_autogroup: true/false 가 필요합니다 ('{value}')"
+                        ))
+                    })?
+                }
+                "auto" => {
+                    c.auto = parse_bool(value)
+                        .ok_or_else(|| err(format!("auto: true/false 가 필요합니다 ('{value}')")))?
+                }
+                "effect_check" => {
+                    c.effect_check = parse_bool(value).ok_or_else(|| {
+                        err(format!(
+                            "effect_check: true/false 가 필요합니다 ('{value}')"
+                        ))
+                    })?
+                }
                 "interval_ms" => c.interval_ms = int("interval_ms")?,
                 "nice_target" => {
                     c.nice_target = value
                         .parse::<i32>()
                         .map_err(|_| err(format!("nice_target: 정수가 필요합니다 ('{value}')")))?
                 }
-                "cpu_enter" => c.cpu_enter = num("cpu_enter")?,
-                "cpu_leave" => c.cpu_leave = num("cpu_leave")?,
-                "mem_enter" => c.mem_enter = num("mem_enter")?,
-                "mem_leave" => c.mem_leave = num("mem_leave")?,
+                "auto_hog_cpu" => c.auto_hog_cpu = num("auto_hog_cpu")?,
+                "auto_hog_secs" => c.auto_hog_secs = int("auto_hog_secs")?,
+                "auto_min_uid" => c.auto_min_uid = int("auto_min_uid")?.min(u32::MAX as u64) as u32,
+                "stall_gate" => c.stall_gate = num("stall_gate")?,
+                "demand_enter" => c.demand_enter = num("demand_enter")?,
+                "demand_high" => c.demand_high = num("demand_high")?,
+                "demand_low" => c.demand_low = num("demand_low")?,
+                "release_below" => c.release_below = num("release_below")?,
+                "release_secs" => c.release_secs = int("release_secs")?,
+                "retry_after_secs" => c.retry_after_secs = int("retry_after_secs")?,
+                "foreground_cmd" => {
+                    if value.is_empty() {
+                        return Err(err("foreground_cmd: 명령이 비어 있습니다".to_string()));
+                    }
+                    c.foreground_cmd = Some(value.to_string())
+                }
                 "critical_enter" => c.critical_enter = num("critical_enter")?,
                 "critical_leave" => c.critical_leave = num("critical_leave")?,
                 "confirm" => c.confirm = int("confirm")?.min(u32::MAX as u64) as u32,
@@ -245,19 +313,45 @@ impl Config {
         if self.confirm == 0 {
             return bad("confirm 은 1 이상이어야 합니다");
         }
-        for (name, enter, leave) in [
-            ("cpu", self.cpu_enter, self.cpu_leave),
-            ("mem", self.mem_enter, self.mem_leave),
-            ("critical", self.critical_enter, self.critical_leave),
+        let pct = |name: &str, v: f64| -> Result<(), ConfigError> {
+            if (0.0..=100.0).contains(&v) {
+                Ok(())
+            } else {
+                Err(ConfigError {
+                    line: 0,
+                    message: format!("{name} 는 0~100 사이여야 합니다"),
+                })
+            }
+        };
+        for (n, v) in [
+            ("stall_gate", self.stall_gate),
+            ("demand_enter", self.demand_enter),
+            ("demand_high", self.demand_high),
+            ("demand_low", self.demand_low),
+            ("release_below", self.release_below),
+            ("critical_enter", self.critical_enter),
+            ("critical_leave", self.critical_leave),
+            ("auto_hog_cpu", self.auto_hog_cpu.min(100.0)),
         ] {
-            if !(0.0..=100.0).contains(&enter) || !(0.0..=100.0).contains(&leave) {
-                return bad(&format!(
-                    "{name}_enter/{name}_leave 는 0~100 사이여야 합니다"
-                ));
-            }
-            if leave >= enter {
-                return bad(&format!("{name}_leave 는 {name}_enter 보다 작아야 합니다 (진입·해제 사이에 여유가 있어야 흔들리지 않습니다)"));
-            }
+            pct(n, v)?;
+        }
+        if self.auto_hog_cpu <= 0.0 {
+            return bad("auto_hog_cpu 는 0보다 커야 합니다");
+        }
+        if self.demand_low >= self.demand_high {
+            return bad("demand_low 는 demand_high 보다 작아야 합니다 (그 사이가 흔들리지 않게 하는 여유 구간입니다)");
+        }
+        if self.demand_enter > self.demand_high {
+            return bad("demand_enter 는 demand_high 보다 클 수 없습니다");
+        }
+        if self.release_below >= self.demand_enter {
+            return bad("release_below 는 demand_enter 보다 작아야 합니다");
+        }
+        if self.stall_gate > self.demand_enter {
+            return bad("stall_gate 는 demand_enter 보다 클 수 없습니다 (그러면 개입 기준에 닿기 전에 막힙니다)");
+        }
+        if self.critical_leave >= self.critical_enter {
+            return bad("critical_leave 는 critical_enter 보다 작아야 합니다");
         }
         Ok(())
     }
@@ -273,6 +367,8 @@ mod tests {
         assert!(c.validate().is_ok());
         assert!(c.dry_run, "must default to observe-only");
         assert!(!c.trim_idle, "trimming must be opt-in");
+        assert!(!c.auto, "automatic hog detection must be opt-in");
+        assert!(c.use_autogroup);
     }
 
     #[test]
@@ -282,11 +378,14 @@ mod tests {
 dry_run = false
 interval_ms = 1000   # trailing comment
 nice_target = 12
+auto = yes
+auto_hog_cpu = 70
+foreground_cmd = cat /tmp/fg
 yield = /usr/bin/ffmpeg
 yield = comm:make
 protect = comm:obs
-cpu_enter = 85
-cpu_leave = 50
+demand_enter = 25
+demand_high = 40
 trim_idle = yes
 x_display = :0
 state_dir = /tmp/rf
@@ -303,7 +402,10 @@ state_dir = /tmp/rf
             ]
         );
         assert_eq!(c.protect, vec![Matcher::Comm("obs".into())]);
-        assert_eq!(c.cpu_enter, 85.0);
+        assert_eq!(c.demand_enter, 25.0);
+        assert!(c.auto);
+        assert_eq!(c.auto_hog_cpu, 70.0);
+        assert_eq!(c.foreground_cmd.as_deref(), Some("cat /tmp/fg"));
         assert!(c.trim_idle);
         assert_eq!(c.x_display.as_deref(), Some(":0"));
         assert_eq!(c.state_dir, Some(PathBuf::from("/tmp/rf")));
@@ -325,9 +427,17 @@ state_dir = /tmp/rf
         assert!(Config::parse("interval_ms = 10").is_err());
         assert!(Config::parse("confirm = 0").is_err());
         assert!(Config::parse("just a line").is_err());
-        assert!(Config::parse("cpu_enter = 50\ncpu_leave = 60").is_err());
-        assert!(Config::parse("cpu_enter = 150").is_err());
-        assert!(Config::parse("cpu_enter = NaN").is_err());
+        assert!(Config::parse("demand_low = 50\ndemand_high = 40").is_err());
+        assert!(Config::parse("demand_enter = 150").is_err());
+        assert!(Config::parse("demand_enter = NaN").is_err());
+        assert!(Config::parse("release_below = 30").is_err());
+        assert!(Config::parse("stall_gate = 30").is_err());
+        assert!(Config::parse("auto_hog_cpu = 0").is_err());
+        assert!(Config::parse("foreground_cmd =").is_err());
+        assert!(
+            Config::parse("cpu_enter = 80").is_err(),
+            "removed keys are rejected loudly, not ignored"
+        );
     }
 
     #[test]

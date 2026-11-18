@@ -15,6 +15,7 @@ RamFlow (리눅스) — 지금 쓰는 작업을 먼저 지켜주는 자원 관�
 
 사용법:
   ramflow status                     현재 메모리·CPU 압박 상태를 한 번 보여줍니다
+  ramflow blame [--secs N]           지금 누가 누구를 느리게 하는지 N초(기본 3) 재서 보여줍니다
   ramflow doctor                     이 컴퓨터에서 어떤 기능을 쓸 수 있는지 점검합니다
   ramflow run [옵션]                 감시를 시작합니다 (기본은 예행연습: 아무것도 바꾸지 않음)
   ramflow restore [옵션]             저널에 남은 변경을 모두 원래대로 되돌립니다
@@ -154,8 +155,10 @@ fn cmd_run(args: &[String]) -> i32 {
              안전하지 않기 때문입니다. sudo 로 실행하거나 systemd 서비스를 사용하세요.",
         );
     }
-    if cfg.yield_list.is_empty() && !cfg.trim_idle {
-        eprintln!("안내: 설정에 양보할 작업(yield)이 없고 메모리 정리도 꺼져 있어, 관찰만 합니다.");
+    if cfg.yield_list.is_empty() && !cfg.trim_idle && !cfg.auto {
+        eprintln!(
+            "안내: 설정에 양보할 작업(yield)이 없고 자동 분류(auto)와 메모리 정리도 꺼져 있어, 관찰만 합니다."
+        );
     }
 
     let provider = LinuxProvider::new(&cfg);
@@ -165,6 +168,7 @@ fn cmd_run(args: &[String]) -> i32 {
     let dry_run = cfg.dry_run;
     let has_fg = provider.has_foreground_source();
     let trim = cfg.trim_idle;
+    let auto = cfg.auto;
     let mut engine = Engine::new(cfg, provider, journal);
 
     sys::install_shutdown_handlers();
@@ -178,7 +182,17 @@ fn cmd_run(args: &[String]) -> i32 {
         }
     );
     if trim && !has_fg {
-        eprintln!("안내: 앞에 있는 창을 알 수 없어(X11 없음) 메모리 정리는 동작하지 않습니다.");
+        eprintln!("안내: 앞에 있는 창을 알 수 없어 메모리 정리는 동작하지 않습니다.");
+    }
+    if !has_fg {
+        eprintln!(
+            "안내: 앞에 있는 창을 알 수 없습니다 (X11 없음, foreground_cmd 없음). 이 경우 \
+             시스템 전체의 CPU 정체율만 보고 판단하며, 자동 분류(auto)는 동작하지 않습니다."
+        );
+    } else if auto {
+        println!(
+            "자동 분류 켜짐: 목록에 없어도 코어를 오래 독차지하는 프로그램을 찾아 양보시킵니다."
+        );
     }
     // Crash recovery: undo whatever an earlier run left behind.
     print_events(&engine.restore_everything());
@@ -242,6 +256,130 @@ fn cmd_restore(args: &[String]) -> i32 {
         eprintln!("일부는 되돌리지 못했습니다. root 권한으로 다시 실행해 보세요.");
         2
     }
+}
+
+fn cmd_blame(args: &[String]) -> i32 {
+    let mut secs = 3u64;
+    let mut cfg_path: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--secs" => match it.next().and_then(|v| v.parse::<u64>().ok()) {
+                Some(n) if (1..=30).contains(&n) => secs = n,
+                _ => return fail("--secs 뒤에는 1~30 사이의 숫자가 필요합니다"),
+            },
+            "--config" => match it.next() {
+                Some(v) => cfg_path = Some(PathBuf::from(v)),
+                None => return fail("--config 뒤에 파일 경로가 필요합니다"),
+            },
+            other => return fail(&format!("알 수 없는 옵션: {other}")),
+        }
+    }
+    let cfg = match load_config(&Opts {
+        config: cfg_path,
+        state_dir: None,
+        apply: false,
+        once: false,
+    }) {
+        Ok(c) => c,
+        Err(e) => return fail(&e),
+    };
+    let mut p = LinuxProvider::new(&cfg);
+    let clk = sys::clock_ticks().max(1) as f64;
+    let first_procs = p.scan();
+    let fg = p.foreground();
+    let fg_wait0 = fg.and_then(|f| p.wait_ns(f));
+    let snap0 = p.snapshot().ok();
+    let t0 = Instant::now();
+    println!("RamFlow 범인 찾기 — {secs}초 동안 재는 중...");
+    std::thread::sleep(Duration::from_secs(secs));
+    let dt = t0.elapsed().as_secs_f64();
+    let procs = p.scan();
+    let snap1 = p.snapshot().ok();
+
+    let stall = match (
+        snap0.as_ref().and_then(|s| s.cpu_psi),
+        snap1.as_ref().and_then(|s| s.cpu_psi),
+    ) {
+        (Some(a), Some(b)) => Some(
+            (b.some_total_us.saturating_sub(a.some_total_us) as f64 / (dt * 1e6) * 100.0)
+                .clamp(0.0, 100.0),
+        ),
+        _ => None,
+    };
+    let fg_sample = fg.and_then(|f| procs.iter().find(|s| s.pid == f));
+    let mut victim_suffers = false;
+    match (fg_sample, fg_wait0, fg.and_then(|f| p.wait_ns(f))) {
+        (Some(s), Some(w0), Some(w1)) => {
+            let before = first_procs.iter().find(|x| x.identity() == s.identity());
+            let wait = w1.saturating_sub(w0) as f64 / (dt * 1e9) * 100.0;
+            let run = before
+                .map(|b| s.ticks.saturating_sub(b.ticks) as f64 / clk / dt * 100.0)
+                .unwrap_or(0.0);
+            let activity = wait + run;
+            println!("\n앞에 있는 프로그램: {}({})", s.comm, s.pid);
+            if activity >= 5.0 {
+                let ratio = wait / activity * 100.0;
+                println!("  CPU를 쓰려 한 시간 중 {ratio:.0}% 를 차례를 기다리느라 보냈습니다 (CPU 사용 {run:.0}%, 기다림 {wait:.0}%)");
+                victim_suffers = ratio >= cfg.demand_enter;
+            } else {
+                println!(
+                    "  지금은 거의 일하지 않습니다 (CPU 사용 {run:.0}%) — 느려질 일이 없습니다"
+                );
+            }
+        }
+        _ => println!(
+            "\n앞에 있는 프로그램을 알 수 없습니다 (X11이 아니거나 foreground_cmd 가 없음)."
+        ),
+    }
+    if let Some(s) = stall {
+        println!("시스템 CPU 정체율: {s:.0}% (일하려는 작업 중 하나라도 기다린 시간의 비율)");
+    }
+
+    let protected = ramflow::engine::protected_set(&procs, fg);
+    let mut rows: Vec<(f64, &ramflow::proc::ProcessSample)> = procs
+        .iter()
+        .filter_map(|s| {
+            let b = first_procs.iter().find(|x| x.identity() == s.identity())?;
+            let pct = s.ticks.saturating_sub(b.ticks) as f64 / clk / dt * 100.0;
+            (pct >= 5.0).then_some((pct, s))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    println!("\nCPU를 많이 쓰는 프로그램 (코어 1개 = 100%)");
+    if rows.is_empty() {
+        println!("  없음");
+    }
+    let fg_group = fg_sample.map(|s| s.autogroup).unwrap_or(0);
+    for (pct, s) in rows.iter().take(8) {
+        let tag = if protected.contains(&s.pid) {
+            "앞에서 쓰는 중 — 건드리지 않음".to_string()
+        } else if s.autogroup != 0 && s.autogroup != fg_group {
+            format!("다른 세션({}) — 세션 전체를 낮출 수 있음", s.autogroup)
+        } else {
+            "같은 세션 — 프로세스 단위로만 낮출 수 있음".to_string()
+        };
+        let listed = cfg
+            .yield_list
+            .iter()
+            .any(|m| m.matches(&s.comm, || p.exe(s.pid)));
+        println!(
+            "  {pct:>4.0}%  {}({})  {}{}",
+            s.comm,
+            s.pid,
+            tag,
+            if listed { "  [yield 목록]" } else { "" }
+        );
+    }
+    println!();
+    if victim_suffers {
+        println!("판단: 앞의 프로그램이 실제로 기다리고 있습니다. 위 목록의 앞쪽 프로그램이 범인 후보입니다.");
+    } else if fg_sample.is_some() {
+        println!("판단: 지금 앞의 프로그램은 괴로워하지 않습니다. 이때는 RamFlow 가 아무도 건드리지 않습니다.");
+    } else {
+        println!("판단: 앞의 프로그램을 몰라 누가 피해자인지 알 수 없습니다.");
+    }
+    0
 }
 
 fn cmd_status() -> i32 {
@@ -325,6 +463,26 @@ fn cmd_doctor() -> i32 {
             "없으면 사용 가능 메모리만으로 판단합니다 (커널 4.20 이상, psi=1 필요할 수 있음)"
         }
     );
+    let cpu_psi = p.proc().psi("cpu").is_some();
+    println!(
+        "{} CPU 정체 정보(PSI) — {}",
+        mark(Some(cpu_psi)),
+        if cpu_psi {
+            "시스템이 얼마나 CPU를 기다리는지 바로 잴 수 있습니다"
+        } else {
+            "없으면 CPU 사용률이 90% 이상일 때만 개입을 검토합니다"
+        }
+    );
+    let ag = p.autogroup_enabled();
+    println!(
+        "{} 세션 단위 스케줄링(autogroup) — {}",
+        mark(Some(ag)),
+        if ag {
+            "켜져 있음: 다른 세션의 작업은 세션 전체를 낮춰야 실제로 효과가 납니다 (use_autogroup = true)"
+        } else {
+            "꺼져 있음: 프로세스 단위 우선순위만으로 충분히 효과가 납니다"
+        }
+    );
     let priv_ok = sys::can_restore_priority();
     println!(
         "{} 우선순위를 되돌릴 권한 — {}",
@@ -356,7 +514,7 @@ fn cmd_doctor() -> i32 {
         if fg {
             "X11 (xprop)로 확인합니다"
         } else {
-            "DISPLAY 가 없습니다. Wayland 는 구조상 다른 프로그램의 창을 볼 수 없어 메모리 정리를 쓸 수 없습니다 (양보 기능은 그대로 동작)"
+            "DISPLAY 가 없습니다. Wayland 에서는 설정의 foreground_cmd 에 '앞 창의 pid 를 출력하는 명령'을 적어 주세요 (없어도 시스템 전체 정체율로 양보는 동작합니다)"
         }
     );
     let xprop = std::process::Command::new("xprop")
@@ -433,10 +591,14 @@ fn fail(msg: &str) -> i32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) != Some("run") {
+        sys::quiet_on_closed_pipe();
+    }
     let code = match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("restore") => cmd_restore(&args[1..]),
         Some("status") => cmd_status(),
+        Some("blame") => cmd_blame(&args[1..]),
         Some("doctor") => cmd_doctor(),
         Some("version") | Some("--version") | Some("-V") => {
             println!("ramflow {}", env!("CARGO_PKG_VERSION"));

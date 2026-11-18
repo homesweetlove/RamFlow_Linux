@@ -1,0 +1,109 @@
+alone (no background): short p95 2.88 ms, long job 154.4 ms
+round 1 same     none : long job   396.9 ms | short p95   2.14 ms | background 1.73/2 cores | lowered after - | {}
+round 1 same     task : long job   173.2 ms | short p95   2.30 ms | background 1.62/2 cores | lowered after 2.0s | {'yielded': 8, 'level_changes': 1, 'no_effect': 0, 'hogs': 0}
+round 1 same     group: long job   182.1 ms | short p95   2.87 ms | background 1.59/2 cores | lowered after 2.0s | {'yielded': 8, 'level_changes': 1, 'no_effect': 0, 'hogs': 0}
+round 1 same     auto : long job   169.0 ms | short p95   2.57 ms | background 1.56/2 cores | lowered after 7.0s | {'yielded': 4, 'level_changes': 1, 'no_effect': 0, 'hogs': 4}
+round 1 separate none : long job   182.4 ms | short p95   6.28 ms | background 1.55/2 cores | lowered after - | {}
+round 1 separate task : long job   148.9 ms | short p95   5.53 ms | background 1.56/2 cores | lowered after - | {'yielded': 0, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+round 1 separate group: long job   180.6 ms | short p95   5.51 ms | background 1.54/2 cores | lowered after - | {'yielded': 2, 'level_changes': 1, 'no_effect': 0, 'hogs': 0}
+round 1 separate auto : long job   130.9 ms | short p95   2.57 ms | background 1.61/2 cores | lowered after - | {'yielded': 0, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+round 2 separate auto : long job   122.9 ms | short p95   2.30 ms | background 1.61/2 cores | lowered after - | {'yielded': 0, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+round 2 separate group: long job   159.9 ms | short p95   2.84 ms | background 1.56/2 cores | lowered after - | {'yielded': 1, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+round 2 separate task : long job   155.6 ms | short p95   2.53 ms | background 1.58/2 cores | lowered after - | {'yielded': 0, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+round 2 separate none : long job   157.8 ms | short p95   3.09 ms | background 1.56/2 cores | lowered after - | {}
+round 2 same     auto : long job   122.4 ms | short p95   1.23 ms | background 1.62/2 cores | lowered after 7.0s | {'yielded': 4, 'level_changes': 1, 'no_effect': 0, 'hogs': 4}
+round 2 same     group: long job   172.5 ms | short p95   2.03 ms | background 1.61/2 cores | lowered after 2.0s | {'yielded': 8, 'level_changes': 1, 'no_effect': 0, 'hogs': 0}
+round 2 same     task : long job   192.4 ms | short p95   2.55 ms | background 1.58/2 cores | lowered after 2.0s | {'yielded': 8, 'level_changes': 1, 'no_effect': 0, 'hogs': 0}
+round 2 same     none : long job   478.7 ms | short p95   2.50 ms | background 1.72/2 cores | lowered after - | {}
+round 3 same     none : long job   369.8 ms | short p95   2.83 ms | background 1.73/2 cores | lowered after - | {}
+round 3 same     task : long job   196.1 ms | short p95   5.49 ms | background 1.58/2 cores | lowered after 2.0s | {'yielded': 8, 'level_changes': 1, 'no_effect': 0, 'hogs': 0}
+round 3 same     group: long job   159.5 ms | short p95   2.31 ms | background 1.62/2 cores | lowered after 2.2s | {'yielded': 8, 'level_changes': 1, 'no_effect': 0, 'hogs': 0}
+round 3 same     auto : long job   160.0 ms | short p95   3.23 ms | background 1.53/2 cores | lowered after 7.0s | {'yielded': 4, 'level_changes': 1, 'no_effect': 0, 'hogs': 4}
+round 3 separate none : long job   167.3 ms | short p95   3.02 ms | background 1.58/2 cores | lowered after - | {}
+round 3 separate task : long job   126.2 ms | short p95   2.73 ms | background 1.61/2 cores | lowered after - | {'yielded': 0, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+round 3 separate group: long job   125.7 ms | short p95   1.72 ms | background 1.62/2 cores | lowered after - | {'yielded': 0, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+round 3 separate auto : long job   213.1 ms | short p95   6.70 ms | background 1.52/2 cores | lowered after - | {'yielded': 0, 'level_changes': 0, 'no_effect': 0, 'hogs': 0}
+{
+  "cores": 2,
+  "culprits": 4,
+  "rounds": 3,
+  "alone_ms": {
+    "long_job": 154.4326009999395,
+    "short_p95": 2.8834830000050715
+  },
+  "all_restored_on_sigterm": true,
+  "cases": {
+    "same/none": {
+      "long_job_ms": 396.9,
+      "short_p95_ms": 2.5,
+      "background_cores": 1.73,
+      "long_job_change_pct": 0.0,
+      "short_p95_change_pct": 0.0,
+      "background_change_pct": 0.0,
+      "no_effect_withdrawals": 0
+    },
+    "same/task": {
+      "long_job_ms": 192.4,
+      "short_p95_ms": 2.55,
+      "background_cores": 1.58,
+      "long_job_change_pct": -51.5,
+      "short_p95_change_pct": 1.9,
+      "background_change_pct": -8.4,
+      "no_effect_withdrawals": 0
+    },
+    "same/group": {
+      "long_job_ms": 172.5,
+      "short_p95_ms": 2.31,
+      "background_cores": 1.61,
+      "long_job_change_pct": -56.5,
+      "short_p95_change_pct": -7.6,
+      "background_change_pct": -6.8,
+      "no_effect_withdrawals": 0
+    },
+    "same/auto": {
+      "long_job_ms": 160.0,
+      "short_p95_ms": 2.57,
+      "background_cores": 1.56,
+      "long_job_change_pct": -59.7,
+      "short_p95_change_pct": 2.8,
+      "background_change_pct": -9.9,
+      "no_effect_withdrawals": 0
+    },
+    "separate/none": {
+      "long_job_ms": 167.3,
+      "short_p95_ms": 3.09,
+      "background_cores": 1.56,
+      "long_job_change_pct": 0.0,
+      "short_p95_change_pct": 0.0,
+      "background_change_pct": 0.0,
+      "no_effect_withdrawals": 0
+    },
+    "separate/task": {
+      "long_job_ms": 148.9,
+      "short_p95_ms": 2.73,
+      "background_cores": 1.58,
+      "long_job_change_pct": -11.0,
+      "short_p95_change_pct": -11.7,
+      "background_change_pct": 1.8,
+      "no_effect_withdrawals": 0
+    },
+    "separate/group": {
+      "long_job_ms": 159.9,
+      "short_p95_ms": 2.84,
+      "background_cores": 1.56,
+      "long_job_change_pct": -4.4,
+      "short_p95_change_pct": -8.0,
+      "background_change_pct": 0.4,
+      "no_effect_withdrawals": 0
+    },
+    "separate/auto": {
+      "long_job_ms": 130.9,
+      "short_p95_ms": 2.57,
+      "background_cores": 1.61,
+      "long_job_change_pct": -21.8,
+      "short_p95_change_pct": -16.8,
+      "background_change_pct": 3.2,
+      "no_effect_withdrawals": 0
+    }
+  }
+}

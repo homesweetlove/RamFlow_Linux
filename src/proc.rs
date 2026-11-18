@@ -70,6 +70,9 @@ pub struct Psi {
     pub some_avg60: f64,
     pub full_avg10: f64,
     pub full_avg60: f64,
+    /// Cumulative microseconds with at least one task stalled (`some total=`). Differences of
+    /// this counter give the *instantaneous* stall rate; the averages lag by seconds.
+    pub some_total_us: u64,
 }
 
 /// Parse `/proc/pressure/{memory,cpu,io}`. The `full` line is optional (older kernels, cpu).
@@ -79,18 +82,21 @@ pub fn parse_psi(text: &str) -> Option<Psi> {
     for line in text.lines() {
         let mut parts = line.split_whitespace();
         let kind = parts.next()?;
-        let (mut a10, mut a60) = (None, None);
+        let (mut a10, mut a60, mut total) = (None, None, 0u64);
         for p in parts {
             if let Some(v) = p.strip_prefix("avg10=") {
                 a10 = v.parse::<f64>().ok();
             } else if let Some(v) = p.strip_prefix("avg60=") {
                 a60 = v.parse::<f64>().ok();
+            } else if let Some(v) = p.strip_prefix("total=") {
+                total = v.parse::<u64>().unwrap_or(0);
             }
         }
         match (kind, a10, a60) {
             ("some", Some(a), Some(b)) => {
                 psi.some_avg10 = a;
                 psi.some_avg60 = b;
+                psi.some_total_us = total;
                 has_some = true;
             }
             ("full", Some(a), Some(b)) => {
@@ -160,6 +166,8 @@ pub struct ProcessSample {
     /// Resident set size in bytes.
     pub rss: u64,
     pub uid: u32,
+    /// Scheduler autogroup (one per session). 0 = unknown / autogroup unavailable.
+    pub autogroup: u64,
 }
 
 impl ProcessSample {
@@ -205,7 +213,25 @@ pub fn parse_pid_stat(text: &str, page_size: u64) -> Option<ProcessSample> {
         ticks: utime + stime,
         rss: rss_pages.max(0) as u64 * page_size,
         uid: 0,
+        autogroup: 0,
     })
+}
+
+/// Parse `/proc/<pid>/autogroup`: `/autogroup-3 nice 0` → (3, 0).
+pub fn parse_autogroup(text: &str) -> Option<(u64, i32)> {
+    let rest = text.trim().strip_prefix("/autogroup-")?;
+    let (id, tail) = rest.split_once(' ')?;
+    let nice = tail.trim().strip_prefix("nice")?.trim().parse().ok()?;
+    Some((id.parse().ok()?, nice))
+}
+
+/// Parse `/proc/<pid>/schedstat`: `run_ns wait_ns timeslices`. The wait time is how long the
+/// task was runnable but had no CPU — i.e. how much it *suffered* from contention.
+pub fn parse_schedstat(text: &str) -> Option<(u64, u64)> {
+    let mut f = text.split_whitespace();
+    let run = f.next()?.parse().ok()?;
+    let wait = f.next()?.parse().ok()?;
+    Some((run, wait))
 }
 
 /// Parse `/proc/<pid>/maps` and return the private anonymous read-write ranges
@@ -303,6 +329,7 @@ impl Proc {
             return None;
         }
         s.uid = fs::metadata(&dir).map(|m| m.uid()).unwrap_or(u32::MAX);
+        s.autogroup = self.autogroup(pid).map(|a| a.0).unwrap_or(0);
         Some(s)
     }
 
@@ -330,6 +357,31 @@ impl Proc {
             .collect();
         v.sort_unstable();
         v
+    }
+
+    /// (autogroup id, autogroup nice) of a process, if the kernel has autogroup enabled.
+    pub fn autogroup(&self, pid: i32) -> Option<(u64, i32)> {
+        parse_autogroup(&self.read(&format!("{pid}/autogroup"))?)
+    }
+
+    /// Total time (ns) all threads of `pid` spent runnable-but-waiting for a CPU.
+    pub fn wait_ns(&self, pid: i32) -> Option<u64> {
+        let tids = self.tids(pid);
+        if tids.is_empty() {
+            return parse_schedstat(&self.read(&format!("{pid}/schedstat"))?).map(|x| x.1);
+        }
+        let mut total = 0u64;
+        let mut any = false;
+        for tid in tids.into_iter().take(64) {
+            if let Some((_, w)) = self
+                .read(&format!("{pid}/task/{tid}/schedstat"))
+                .and_then(|t| parse_schedstat(&t))
+            {
+                total += w;
+                any = true;
+            }
+        }
+        any.then_some(total)
     }
 
     pub fn maps(&self, pid: i32) -> Option<String> {
@@ -438,6 +490,29 @@ mod tests {
         assert_eq!(s.comm, "Web Content (x)");
         assert_eq!(s.nice, 5);
         assert_eq!(s.start, 987_654);
+    }
+
+    #[test]
+    fn psi_total_is_read() {
+        let p = parse_psi("some avg10=1.00 avg60=1.00 avg300=1.00 total=123456\n").unwrap();
+        assert_eq!(p.some_total_us, 123_456);
+    }
+
+    #[test]
+    fn autogroup_is_parsed() {
+        assert_eq!(parse_autogroup("/autogroup-3 nice 0\n"), Some((3, 0)));
+        assert_eq!(parse_autogroup("/autogroup-17 nice -5"), Some((17, -5)));
+        assert_eq!(parse_autogroup("/autogroup-17 nice 19\n"), Some((17, 19)));
+        assert_eq!(parse_autogroup(""), None);
+        assert_eq!(parse_autogroup("/autogroup-x nice 0"), None);
+        assert_eq!(parse_autogroup("nonsense"), None);
+    }
+
+    #[test]
+    fn schedstat_is_parsed() {
+        assert_eq!(parse_schedstat("1053663 2500 7\n"), Some((1_053_663, 2500)));
+        assert_eq!(parse_schedstat("1"), None);
+        assert_eq!(parse_schedstat("a b c"), None);
     }
 
     #[test]
