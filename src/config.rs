@@ -85,6 +85,9 @@ pub struct Config {
     pub auto: bool,
     /// A process is a hog above this share of one core (percent) …
     pub auto_hog_cpu: f64,
+    /// Same, but used while the whole machine is saturated: then many programs share the
+    /// cores and none of them reaches a big share on its own.
+    pub auto_hog_cpu_busy: f64,
     /// … sustained for this many seconds.
     pub auto_hog_secs: u64,
     /// Auto mode never touches processes of users below this uid (system accounts).
@@ -134,6 +137,7 @@ impl Default for Config {
             use_autogroup: true,
             auto: false,
             auto_hog_cpu: 35.0,
+            auto_hog_cpu_busy: 15.0,
             auto_hog_secs: 5,
             auto_min_uid: 1000,
             foreground_cmd: None,
@@ -263,6 +267,7 @@ impl Config {
                         .map_err(|_| err(format!("nice_target: 정수가 필요합니다 ('{value}')")))?
                 }
                 "auto_hog_cpu" => c.auto_hog_cpu = num("auto_hog_cpu")?,
+                "auto_hog_cpu_busy" => c.auto_hog_cpu_busy = num("auto_hog_cpu_busy")?,
                 "auto_hog_secs" => c.auto_hog_secs = int("auto_hog_secs")?,
                 "auto_min_uid" => c.auto_min_uid = int("auto_min_uid")?.min(u32::MAX as u64) as u32,
                 "stall_gate" => c.stall_gate = num("stall_gate")?,
@@ -332,11 +337,15 @@ impl Config {
             ("critical_enter", self.critical_enter),
             ("critical_leave", self.critical_leave),
             ("auto_hog_cpu", self.auto_hog_cpu.min(100.0)),
+            ("auto_hog_cpu_busy", self.auto_hog_cpu_busy.min(100.0)),
         ] {
             pct(n, v)?;
         }
         if self.auto_hog_cpu <= 0.0 {
             return bad("auto_hog_cpu 는 0보다 커야 합니다");
+        }
+        if self.auto_hog_cpu_busy <= 0.0 {
+            return bad("auto_hog_cpu_busy 는 0보다 커야 합니다");
         }
         if self.demand_low >= self.demand_high {
             return bad("demand_low 는 demand_high 보다 작아야 합니다 (그 사이가 흔들리지 않게 하는 여유 구간입니다)");
@@ -433,6 +442,13 @@ state_dir = /tmp/rf
         assert!(Config::parse("release_below = 30").is_err());
         assert!(Config::parse("stall_gate = 30").is_err());
         assert!(Config::parse("auto_hog_cpu = 0").is_err());
+        assert!(Config::parse("auto_hog_cpu_busy = 0").is_err());
+        assert_eq!(
+            Config::parse("auto_hog_cpu_busy = 20")
+                .unwrap()
+                .auto_hog_cpu_busy,
+            20.0
+        );
         assert!(Config::parse("foreground_cmd =").is_err());
         assert!(
             Config::parse("cpu_enter = 80").is_err(),

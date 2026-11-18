@@ -136,7 +136,7 @@ What this shows, and what it does not:
 - Short interactive bursts (1.5 ms every 10 ms) gain little: Linux already favours sleepers (p95 differences of
   ±10 % between arms are noise; single rounds ranged 1.6–6.3 ms).
 - Caveats: one 2-core VM, kernel 6.18, an extreme synthetic load, a Python probe — not a real browser or editor.
-  The `auto` hog threshold (35 % of a core for 5 s) was chosen with this 4-culprit setup in mind. cgroup v2
+  The `auto` hog threshold (35 % of a core for 5 s, 15 % while the whole machine is saturated) was chosen on a 2-core VM with synthetic culprits. cgroup v2
   `cpu.weight` hosts, other architectures and Wayland compositors were not tested. The numbers in the Windows
   README were measured on Windows and do not carry over.
 

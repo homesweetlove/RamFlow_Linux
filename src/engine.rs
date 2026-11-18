@@ -420,6 +420,8 @@ fn stall_percent(prev: (u64, u64), now: (u64, u64)) -> f64 {
 
 /// How many processes of the foreground's family are read for the wait measurement.
 const FAMILY_CAP: usize = 64;
+/// Machine-wide CPU use (percent) from which the machine counts as saturated.
+const SATURATED_CPU_PCT: f64 = 90.0;
 /// Foreground activity (percent of one core, run + wait) from which its wait ratio is taken at
 /// face value.
 const RELIABLE_ACTIVITY: f64 = 25.0;
@@ -603,8 +605,14 @@ impl<P: Provider> Engine<P> {
             &mut ev,
         );
 
-        let targets =
-            self.collect_targets(&procs, &protected, foreground.is_some(), now_ms, &mut ev);
+        let targets = self.collect_targets(
+            &procs,
+            &protected,
+            foreground.is_some(),
+            snap.cpu_pct,
+            now_ms,
+            &mut ev,
+        );
         let measure = self.measure(&procs, &protected, foreground, stall, snap.cpu_pct, now_ms);
 
         if self.ctl.level() == 0 && !self.journal.is_empty() {
@@ -805,9 +813,17 @@ impl<P: Provider> Engine<P> {
         procs: &[ProcessSample],
         protected: &HashSet<i32>,
         fg_known: bool,
+        machine_cpu_pct: f64,
         now_ms: u64,
         ev: &mut Vec<Event>,
     ) -> Vec<ProcessSample> {
+        // On a saturated machine the cores are shared by many programs, so each one's own
+        // share is small even though together they starve the foreground.
+        let hog_cpu = if machine_cpu_pct >= SATURATED_CPU_PCT {
+            self.cfg.auto_hog_cpu.min(self.cfg.auto_hog_cpu_busy)
+        } else {
+            self.cfg.auto_hog_cpu
+        };
         let clk = sys::clock_ticks().max(1) as f64;
         let interval = self.cfg.interval_ms.max(1);
         let hog_ms = self.cfg.auto_hog_secs * 1000;
@@ -825,7 +841,7 @@ impl<P: Provider> Engine<P> {
                     Some((pt, pms)) if now_ms > pms && now_ms - pms <= interval * 4 => {
                         let dt = (now_ms - pms) as f64;
                         let rate = s.ticks.saturating_sub(pt) as f64 / clk * 1000.0 / dt * 100.0;
-                        if rate >= self.cfg.auto_hog_cpu {
+                        if rate >= hog_cpu {
                             let since = self.hog_since.get(&id).map(|x| x.0).unwrap_or(now_ms);
                             self.hog_since.insert(id, (since, rate));
                         } else {
@@ -2125,6 +2141,27 @@ mod tests {
             "an idle bystander is never lowered"
         );
         assert_eq!(e.provider().gn(3), 0);
+    }
+
+    #[test]
+    fn on_a_saturated_machine_smaller_hogs_count_too() {
+        // 20 % of a core is below the normal bar (60 here) but above the saturated one (15).
+        let run = |machine_cpu: f64| {
+            let mut m = hog_scene();
+            m.snap.cpu_pct = machine_cpu;
+            let mut e = engine(auto_cfg(), m);
+            let mut t = 0;
+            let mut ev = vec![];
+            for _ in 0..10 {
+                ev.extend(hog_second(&mut e, &mut t, 60.0, 20.0));
+            }
+            ev
+        };
+        assert!(has(&run(97.0), |x| matches!(
+            x,
+            Event::HogFound { pid: 10, .. }
+        )));
+        assert!(!has(&run(40.0), |x| matches!(x, Event::HogFound { .. })));
     }
 
     #[test]
