@@ -1,0 +1,29 @@
+{
+ "binary_bytes": 645264,
+ "results": [
+  {
+   "idle_processes": 0,
+   "daemon_cpu_percent_of_one_core": 0.07,
+   "rss_kib": 2664,
+   "peak_rss_kib": 2664,
+   "threads": 1,
+   "seconds": 60
+  },
+  {
+   "idle_processes": 500,
+   "daemon_cpu_percent_of_one_core": 0.33,
+   "rss_kib": 2960,
+   "peak_rss_kib": 2960,
+   "threads": 1,
+   "seconds": 60
+  },
+  {
+   "idle_processes": 2000,
+   "daemon_cpu_percent_of_one_core": 1.13,
+   "rss_kib": 3244,
+   "peak_rss_kib": 3260,
+   "threads": 1,
+   "seconds": 60
+  }
+ ]
+}
