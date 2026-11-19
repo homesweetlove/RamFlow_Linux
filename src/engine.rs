@@ -2054,6 +2054,7 @@ mod tests {
     fn without_a_foreground_the_machine_wide_stall_decides() {
         let mut m = scene(2);
         m.fg = None;
+        m.snap.cpu_pct = 95.0; // a stalled machine is a busy machine
         let mut e = engine(cfg(), m);
         let mut t = 0;
         let ev = run_seconds(&mut e, &mut t, 2, 0.0, 0.0, 70.0);

@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 d = sys.argv[1]
 rows = list(csv.DictReader(open(f"{d}/trials.csv")))
-arms = ["off", "on", "auto", "auto15"]
+arms = [a for a in ["off", "on", "auto", "auto15"] if any(r["condition"] == a for r in rows)]
 label = {"off": "RamFlow 꺼짐", "on": "목록 지정", "auto": "자동 (기본 기준)", "auto15": "자동 (15% 기준)"}
 color = {"off": "#6b6a66", "on": "#2a78d6", "auto": "#eb6834", "auto15": "#1baf7a"}
 mark = {"off": "o", "on": "s", "auto": "^", "auto15": "D"}
@@ -18,7 +18,7 @@ for ax, (metric, title) in zip(axes, (("search", "검색 (행 1,000개 다시 �
     for si, arm in enumerate(arms):
         pts = sorted((int(r["block"]), float(r["p95Ms"])) for r in rows if r["condition"] == arm and r["metric"] == metric)
         med = statistics.median(v for _, v in pts)
-        ax.scatter([si + (b - 3) * 0.06 for b, _ in pts], [v for _, v in pts], s=36, color=color[arm], marker=mark[arm], zorder=3, edgecolor="#fcfcfb", linewidth=1)
+        ax.scatter([si + (b - 3) * 0.04 for b, _ in pts], [v for _, v in pts], s=36, color=color[arm], marker=mark[arm], zorder=3, edgecolor="#fcfcfb", linewidth=1)
         ax.hlines(med, si - 0.3, si + 0.3, color=color[arm], linewidth=2, zorder=2)
         ax.text(si + 0.33, med, f"{med:.0f}", ha="left", va="center", fontsize=10, color="#0b0b0b")
     ax.set_xticks(range(len(arms)), [label[a] for a in arms], fontsize=9)

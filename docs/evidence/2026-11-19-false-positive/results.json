@@ -1,0 +1,54 @@
+[
+ {
+  "lowered_seconds": 16.0,
+  "engagements": 1,
+  "scenario": "A",
+  "arm": "list",
+  "lowered_ever": true,
+  "yielded_events": 16,
+  "hogs_found": 0,
+  "chrome_nice_touched": [],
+  "bg_pristine": true,
+  "restored": true,
+  "passed": true
+ },
+ {
+  "lowered_seconds": 0,
+  "engagements": 0,
+  "scenario": "A",
+  "arm": "auto",
+  "lowered_ever": false,
+  "yielded_events": 0,
+  "hogs_found": 8,
+  "chrome_nice_touched": [],
+  "bg_pristine": true,
+  "restored": true,
+  "passed": true
+ },
+ {
+  "lowered_seconds": 0,
+  "engagements": 0,
+  "scenario": "B",
+  "arm": "list",
+  "lowered_ever": false,
+  "yielded_events": 0,
+  "hogs_found": 0,
+  "chrome_nice_touched": [],
+  "bg_pristine": true,
+  "restored": true,
+  "passed": true
+ },
+ {
+  "lowered_seconds": 0,
+  "engagements": 0,
+  "scenario": "B",
+  "arm": "auto",
+  "lowered_ever": false,
+  "yielded_events": 0,
+  "hogs_found": 0,
+  "chrome_nice_touched": [],
+  "bg_pristine": true,
+  "restored": true,
+  "passed": true
+ }
+]

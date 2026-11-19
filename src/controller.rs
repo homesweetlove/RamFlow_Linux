@@ -34,6 +34,10 @@ pub struct ControllerCfg {
     pub retry_after_ms: u64,
 }
 
+/// The foreground must be doing at least this much (percent of one core, run + wait) for its
+/// suffering to start an engagement: a wake-up of a few percent is not a user waiting.
+const ENGAGE_MIN_ACTIVITY: f64 = 10.0;
+
 /// Below this much culprit CPU the "they gave way" evidence is too weak to trust.
 const CULPRIT_MIN_CPU: f64 = 20.0;
 
@@ -140,7 +144,10 @@ impl Controller {
             }
             // Raw samples decide whether the suffering is sustained (a single spike must not
             // count twice just because the smoothed value decays slowly).
-            if i.demand >= self.cfg.enter && d >= self.cfg.enter * 0.5 {
+            if i.demand >= self.cfg.enter
+                && d >= self.cfg.enter * 0.5
+                && i.activity >= ENGAGE_MIN_ACTIVITY
+            {
                 self.in_streak += 1;
                 self.in_sum += i.demand;
             } else {
@@ -497,6 +504,21 @@ mod tests {
         ds.extend(run(&mut c, 11_000, 1, 100.0)); // one spike
         ds.extend(run(&mut c, 12_000, 20, 36.0));
         assert!(!ds.contains(&Decision::NoEffect), "{ds:?}");
+    }
+
+    #[test]
+    fn a_nearly_idle_foreground_does_not_start_an_engagement() {
+        let mut c = Controller::new(cfg());
+        let ds: Vec<_> = (0..20)
+            .map(|k| {
+                c.step(&Input {
+                    activity: 7.0,
+                    ..inp(k * 1000, 60.0)
+                })
+            })
+            .collect();
+        assert!(ds.iter().all(|d| *d == Decision::Hold), "{ds:?}");
+        assert_eq!(c.level(), 0);
     }
 
     #[test]

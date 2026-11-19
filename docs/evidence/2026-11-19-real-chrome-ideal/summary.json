@@ -1,0 +1,52 @@
+{
+ "protocol": {
+  "layout": "scattered",
+  "blocks": 5,
+  "seed": 20261118,
+  "samples_per_feature_per_condition": 30,
+  "load": "hash",
+  "background": "0 processes x 2 threads, SHA-256 over 64 KiB, each in its own session"
+ },
+ "environment": {
+  "kernel": "6.18.44-fc-v653",
+  "cores": 2,
+  "chrome": "Chrome/153.0.8010.12",
+  "ramflow": "ramflow 0.2.0"
+ },
+ "features": {
+  "search": {
+   "off_p95_median_ms": 67.2552939997986,
+   "block_p95_off": [
+    68.21031700028107,
+    51.37039199983701,
+    67.2552939997986,
+    65.7476059999317,
+    71.04195300024003
+   ]
+  },
+  "sort": {
+   "off_p95_median_ms": 68.0267369998619,
+   "block_p95_off": [
+    72.25888800015673,
+    69.77658999990672,
+    67.65505799977109,
+    68.0267369998619,
+    67.02218500012532
+   ]
+  }
+ },
+ "background": {
+  "off": {
+   "median_per_second": 0,
+   "per_block": []
+  }
+ },
+ "integrity": {
+  "conditions": 5,
+  "feature_operations": 300,
+  "result_check_failures": 0,
+  "restored_all": true,
+  "journal_removed_all": true,
+  "no_effect_withdrawals": 0
+ }
+}

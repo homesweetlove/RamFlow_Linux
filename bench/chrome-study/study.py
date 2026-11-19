@@ -29,6 +29,8 @@ ap.add_argument("--out", default=os.path.join(HERE, "out"))
 ap.add_argument("--bin", default=os.path.join(HERE, "..", "..", "target", "release", "ramflow"))
 ap.add_argument("--arms", default="off,on,auto,auto15")
 ap.add_argument("--n", type=int, default=30)
+ap.add_argument("--load", choices=("hash", "churn"), default="hash",
+                help="hash: long-running CPU-bound processes; churn: each slot keeps starting short 0.6 s CPU jobs (compiler-like)")
 ap.add_argument("--bg", type=int, default=8, help="number of background processes")
 ap.add_argument("--threads", type=int, default=2, help="threads per background process")
 args = ap.parse_args()
@@ -52,6 +54,19 @@ while True:
     time.sleep(0.25)
     with open(path + ".tmp", "w") as f: f.write(str(sum(counts)))
     os.replace(path + ".tmp", path)
+"""
+
+
+CHURN_CODE = r"""
+import hashlib, os, subprocess, sys, time
+path = sys.argv[1]; total = 0
+child = "import hashlib,os,time;b=os.urandom(65536);n=0;t=time.time()\nwhile time.time()-t<0.6:\n hashlib.sha256(b).digest();n+=1\nprint(n)"
+while True:
+    out = subprocess.run([sys.argv[2], "-c", child], capture_output=True, text=True).stdout
+    total += int(out or 0)
+    with open(path + ".tmp", "w") as f: f.write(str(total))
+    os.replace(path + ".tmp", path)
+    time.sleep(0.05)
 """
 
 
@@ -86,7 +101,8 @@ class Background:
             os.symlink(PY, link)
             self.names.append(name)
             self.procs.append(subprocess.Popen(
-                [link, "-c", BG_CODE, os.path.join(self.dir, f"cnt{i}"), str(THREADS)],
+                ([link, "-c", CHURN_CODE, os.path.join(self.dir, f"cnt{i}"), link] if args.load == "churn"
+                 else [link, "-c", BG_CODE, os.path.join(self.dir, f"cnt{i}"), str(THREADS)]),
                 start_new_session=(layout == "scattered"), stderr=subprocess.DEVNULL))
         self.samples = []  # (epoch seconds, total count)
         self.stop = False
@@ -265,7 +281,7 @@ def main():
         return [t["p95Ms"] for t in trials if t["condition"] == arm and t["metric"] == metric]
 
     summary = {"protocol": {"layout": args.layout, "blocks": args.blocks, "seed": args.seed, "samples_per_feature_per_condition": args.n,
-                            "background": f"{NBG} processes x {THREADS} threads, SHA-256 over 64 KiB, "
+                            "load": args.load, "background": f"{NBG} processes x {THREADS} threads, SHA-256 over 64 KiB, "
                                           + ("each in its own session" if args.layout == "scattered" else "same session as the harness")},
                "environment": {"kernel": platform.release(), "cores": os.cpu_count(), "chrome": meta.get("chrome"),
                                "ramflow": subprocess.run([BIN, "version"], capture_output=True, text=True).stdout.strip()},
@@ -283,10 +299,10 @@ def main():
         summary["features"][metric] = entry
     for arm in ARMS:
         rates = [r["bg_rate"] for r in raw if r["arm"] == arm and r["bg_rate"]]
-        summary["background"][arm] = {"median_per_second": statistics.median(rates), "per_block": rates}
+        summary["background"][arm] = {"median_per_second": statistics.median(rates) if rates else 0, "per_block": rates}
     base = summary["background"]["off"]["median_per_second"]
     for arm in ARMS:
-        if arm != "off":
+        if arm != "off" and base:
             summary["background"][arm]["change_pct"] = round((summary["background"][arm]["median_per_second"] / base - 1) * 100, 1)
     summary["integrity"] = {
         "conditions": len(raw), "feature_operations": sum(len(r["search"]) + len(r["sort"]) for r in raw),
