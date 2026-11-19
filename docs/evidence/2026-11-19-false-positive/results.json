@@ -19,7 +19,7 @@
   "arm": "auto",
   "lowered_ever": false,
   "yielded_events": 0,
-  "hogs_found": 8,
+  "hogs_found": 16,
   "chrome_nice_touched": [],
   "bg_pristine": true,
   "restored": true,

@@ -1,0 +1,93 @@
+{
+ "protocol": {
+  "layout": "scattered",
+  "blocks": 5,
+  "seed": 20261118,
+  "samples_per_feature_per_condition": 30,
+  "load": "hash",
+  "background": "8 processes x 2 threads, SHA-256 over 64 KiB, each in its own session"
+ },
+ "environment": {
+  "kernel": "6.18.44-fc-v653",
+  "cores": 2,
+  "chrome": "Chrome/153.0.8010.12",
+  "ramflow": "ramflow 0.2.0"
+ },
+ "features": {
+  "search": {
+   "off_p95_median_ms": 265.54599700006656,
+   "block_p95_off": [
+    252.27341700007673,
+    265.54599700006656,
+    293.15362999995705,
+    296.7805000001099,
+    196.9106160000665
+   ],
+   "auto": {
+    "p95_median_ms": 76.22288799996022,
+    "block_p95": [
+     80.66923200001474,
+     71.272815000033,
+     70.2303790000733,
+     76.22288799996022,
+     99.63487400009762
+    ],
+    "reduction_pct": 71.3,
+    "improved_blocks": "5/5"
+   }
+  },
+  "sort": {
+   "off_p95_median_ms": 320.92833400005475,
+   "block_p95_off": [
+    320.92833400005475,
+    264.55281599995214,
+    321.8777499999851,
+    296.4511619999539,
+    323.1049659999553
+   ],
+   "auto": {
+    "p95_median_ms": 69.57966099993791,
+    "block_p95": [
+     68.54713500000071,
+     68.81637800007593,
+     72.41895899991505,
+     69.57966099993791,
+     79.91516900004353
+    ],
+    "reduction_pct": 78.3,
+    "improved_blocks": "5/5"
+   }
+  }
+ },
+ "background": {
+  "off": {
+   "median_per_second": 44346.52518435898,
+   "per_block": [
+    44196.4682841863,
+    44346.52518435898,
+    44592.74466184874,
+    45462.64857633852,
+    44225.544117844154
+   ]
+  },
+  "auto": {
+   "median_per_second": 39986.079820145766,
+   "per_block": [
+    39986.079820145766,
+    39479.396576558574,
+    40287.6004466608,
+    40647.44455134234,
+    39636.01137351929
+   ],
+   "change_pct": -9.8
+  }
+ },
+ "integrity": {
+  "conditions": 10,
+  "feature_operations": 600,
+  "result_check_failures": 0,
+  "restored_all": true,
+  "journal_removed_all": true,
+  "no_effect_withdrawals": 0
+ }
+}

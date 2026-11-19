@@ -163,6 +163,9 @@ pub struct ProcessSample {
     pub start: u64,
     /// utime + stime in clock ticks.
     pub ticks: u64,
+    /// cutime + cstime: CPU of children this process has already waited for (clock ticks).
+    /// Makes the work of short-lived children visible through their long-lived parent.
+    pub child_ticks: u64,
     /// Resident set size in bytes.
     pub rss: u64,
     pub uid: u32,
@@ -200,6 +203,8 @@ pub fn parse_pid_stat(text: &str, page_size: u64) -> Option<ProcessSample> {
     let ppid: i32 = field(4)?.parse().ok()?;
     let utime: u64 = field(14)?.parse().ok()?;
     let stime: u64 = field(15)?.parse().ok()?;
+    let cutime: i64 = field(16)?.parse().ok()?;
+    let cstime: i64 = field(17)?.parse().ok()?;
     let nice: i32 = field(19)?.parse().ok()?;
     let start: u64 = field(22)?.parse().ok()?;
     let rss_pages: i64 = field(24)?.parse().ok()?;
@@ -211,6 +216,7 @@ pub fn parse_pid_stat(text: &str, page_size: u64) -> Option<ProcessSample> {
         nice,
         start,
         ticks: utime + stime,
+        child_ticks: (cutime.max(0) + cstime.max(0)) as u64,
         rss: rss_pages.max(0) as u64 * page_size,
         uid: 0,
         autogroup: 0,

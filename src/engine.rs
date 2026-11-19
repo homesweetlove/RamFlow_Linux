@@ -419,6 +419,9 @@ fn stall_percent(prev: (u64, u64), now: (u64, u64)) -> f64 {
 }
 
 /// How many processes of the foreground's family are read for the wait measurement.
+/// identity -> (own cpu ticks, waited-for-children cpu ticks) of one session's members
+type GroupMembers = HashMap<Identity, (u64, u64)>;
+
 const FAMILY_CAP: usize = 64;
 /// Machine-wide CPU use (percent) from which the machine counts as saturated.
 const SATURATED_CPU_PCT: f64 = 90.0;
@@ -450,6 +453,11 @@ pub struct Engine<P: Provider> {
     /// identity -> (since ms, last cpu percent of one core)
     hog_since: HashMap<Identity, (u64, f64)>,
     hog_announced: HashSet<Identity>,
+    /// autogroup -> (member identity -> (own ticks, waited-children ticks)) and when
+    grp_prev: HashMap<u64, (GroupMembers, u64)>,
+    /// autogroup -> (since ms, last cpu percent of one core)
+    grp_since: HashMap<u64, (u64, f64)>,
+    grp_announced: HashSet<u64>,
     /// Sessions whose nice value could not be written (typically a missing capability):
     /// they are handled per process from then on, instead of failing again every sample.
     group_blocked: HashSet<u64>,
@@ -486,6 +494,9 @@ impl<P: Provider> Engine<P> {
             hog_prev: HashMap::new(),
             hog_since: HashMap::new(),
             hog_announced: HashSet::new(),
+            grp_prev: HashMap::new(),
+            grp_since: HashMap::new(),
+            grp_announced: HashSet::new(),
             group_blocked: HashSet::new(),
             was_critical: false,
             me: std::process::id() as i32,
@@ -576,6 +587,9 @@ impl<P: Provider> Engine<P> {
             self.hog_prev.clear();
             self.hog_since.clear();
             self.hog_announced.clear();
+            self.grp_prev.clear();
+            self.grp_since.clear();
+            self.grp_announced.clear();
             return ev;
         }
 
@@ -808,6 +822,100 @@ impl<P: Provider> Engine<P> {
 
     /// The culprits: processes the user listed, plus (in `auto` mode, with a known foreground)
     /// processes that have been hogging a core for a while.
+    /// Sessions (autogroups) whose members together use a lot of CPU for long enough, even
+    /// though no single process does: a build that starts many short compilers, say. A
+    /// session that also holds part of the foreground is never judged (it cannot be lowered
+    /// without lowering the foreground).
+    ///
+    /// A session's CPU is the larger of two views: what its living members used, and what
+    /// the children its members waited for used (short-lived children are only visible
+    /// through their parent). Taking the larger avoids counting the same work twice.
+    fn find_hog_groups(
+        &mut self,
+        procs: &[ProcessSample],
+        protected: &HashSet<i32>,
+        hog_cpu: f64,
+        now_ms: u64,
+        ev: &mut Vec<Event>,
+    ) -> HashSet<u64> {
+        let clk = sys::clock_ticks().max(1) as f64;
+        let hog_ms = self.cfg.auto_hog_secs * 1000;
+        let mut with_foreground: HashSet<u64> = HashSet::new();
+        for s in procs {
+            if s.autogroup != 0 && protected.contains(&s.pid) {
+                with_foreground.insert(s.autogroup);
+            }
+        }
+        let mut now: HashMap<u64, GroupMembers> = HashMap::new();
+        let mut top: HashMap<u64, (u64, i32, String)> = HashMap::new();
+        for s in procs {
+            if s.autogroup == 0
+                || with_foreground.contains(&s.autogroup)
+                || s.uid < self.cfg.auto_min_uid
+                || self.never_touch(s)
+            {
+                continue;
+            }
+            now.entry(s.autogroup)
+                .or_default()
+                .insert(s.identity(), (s.ticks, s.child_ticks));
+            let best = top.entry(s.autogroup).or_insert((0, s.pid, s.comm.clone()));
+            if s.ticks + s.child_ticks >= best.0 {
+                *best = (s.ticks + s.child_ticks, s.pid, s.comm.clone());
+            }
+        }
+        let interval = self.cfg.interval_ms.max(1);
+        let mut hot = HashSet::new();
+        for (g, members) in &now {
+            let rate = match self.grp_prev.get(g) {
+                Some((prev, pms)) if now_ms > *pms && now_ms - *pms <= interval * 4 => {
+                    let (mut own, mut kids) = (0u64, 0u64);
+                    for (id, &(t, c)) in members {
+                        if let Some(&(pt, pc)) = prev.get(id) {
+                            own += t.saturating_sub(pt);
+                            kids += c.saturating_sub(pc);
+                        }
+                    }
+                    Some(own.max(kids) as f64 / clk * 1000.0 / (now_ms - *pms) as f64 * 100.0)
+                }
+                _ => None,
+            };
+            match rate {
+                Some(r) if r >= hog_cpu => {
+                    let since = self.grp_since.get(g).map(|x| x.0).unwrap_or(now_ms);
+                    self.grp_since.insert(*g, (since, r));
+                }
+                _ => {
+                    self.grp_since.remove(g);
+                }
+            }
+            if let Some(&(since, r)) = self.grp_since.get(g) {
+                if now_ms.saturating_sub(since) >= hog_ms {
+                    hot.insert(*g);
+                    if self.grp_announced.insert(*g) {
+                        if let Some((_, pid, comm)) = top.get(g) {
+                            ev.push(Event::HogFound {
+                                pid: *pid,
+                                comm: format!(
+                                    "{comm} (같은 세션의 프로그램 {}개 합계)",
+                                    members.len()
+                                ),
+                                cpu: r,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for (g, members) in now {
+            self.grp_prev.insert(g, (members, now_ms));
+        }
+        self.grp_prev.retain(|_, (_, ms)| *ms == now_ms);
+        self.grp_since.retain(|g, _| self.grp_prev.contains_key(g));
+        self.grp_announced.retain(|g| self.grp_prev.contains_key(g));
+        hot
+    }
+
     fn collect_targets(
         &mut self,
         procs: &[ProcessSample],
@@ -827,6 +935,11 @@ impl<P: Provider> Engine<P> {
         let clk = sys::clock_ticks().max(1) as f64;
         let interval = self.cfg.interval_ms.max(1);
         let hog_ms = self.cfg.auto_hog_secs * 1000;
+        let hog_groups = if self.cfg.auto && fg_known {
+            self.find_hog_groups(procs, protected, hog_cpu, now_ms, ev)
+        } else {
+            HashSet::new()
+        };
         let mut targets = Vec::new();
         let mut seen = HashSet::new();
         for s in procs {
@@ -853,12 +966,16 @@ impl<P: Provider> Engine<P> {
                     }
                 }
             }
+            let in_hog_group = s.autogroup != 0
+                && s.uid >= self.cfg.auto_min_uid
+                && hog_groups.contains(&s.autogroup);
             let hog = self
                 .hog_since
                 .get(&id)
                 .filter(|(since, _)| now_ms.saturating_sub(*since) >= hog_ms);
             if let Some(&(_, rate)) = hog {
-                if self.hog_announced.insert(id) {
+                // the session's own announcement already covers it
+                if !in_hog_group && self.hog_announced.insert(id) {
                     ev.push(Event::HogFound {
                         pid: s.pid,
                         comm: s.comm.clone(),
@@ -866,7 +983,7 @@ impl<P: Provider> Engine<P> {
                     });
                 }
             }
-            if hog.is_some() || self.is_yield_target(s) {
+            if hog.is_some() || in_hog_group || self.is_yield_target(s) {
                 targets.push(s.clone());
             }
         }
@@ -1270,6 +1387,7 @@ mod tests {
             nice,
             start: 5000 + pid as u64,
             ticks: 10,
+            child_ticks: 0,
             rss: 10 * MIB,
             uid: 1000,
             autogroup: group,
@@ -2163,6 +2281,96 @@ mod tests {
             Event::HogFound { pid: 10, .. }
         )));
         assert!(!has(&run(40.0), |x| matches!(x, Event::HogFound { .. })));
+    }
+
+    /// Adds `pct` percent of a core of own CPU to each pid in `pids`, and `kids_pct` of
+    /// waited-for-children CPU to `parent`.
+    fn burn(e: &mut Engine<Mock>, pids: &[i32], pct: f64, parent: Option<(i32, f64)>) {
+        let clk = sys::clock_ticks() as f64;
+        for p in e.provider_mut().procs.iter_mut() {
+            if pids.contains(&p.pid) {
+                p.ticks += (pct / 100.0 * clk).round() as u64;
+            }
+            if let Some((pp, k)) = parent {
+                if p.pid == pp {
+                    p.child_ticks += (k / 100.0 * clk).round() as u64;
+                }
+            }
+        }
+    }
+
+    fn many_small_scene() -> Mock {
+        let mut m = Mock::new(vec![
+            proc_(FG, "terminal", 0, 1),
+            proc_(10, "cc1", 0, 2),
+            proc_(11, "cc1", 0, 2),
+            proc_(12, "cc1", 0, 2),
+            proc_(13, "make", 0, 2),
+            proc_(20, "bystander", 0, 3),
+        ]);
+        m.fg = Some(FG);
+        m
+    }
+
+    #[test]
+    fn a_session_of_many_small_programs_is_a_hog_together() {
+        // Three compilers at 25 % each: none reaches the bar (60 here), the session does.
+        let mut e = engine(auto_cfg(), many_small_scene());
+        let (mut t, mut ev) = (0, vec![]);
+        for _ in 0..10 {
+            burn(&mut e, &[10, 11, 12], 25.0, None);
+            ev.extend(second(&mut e, &mut t, 60.0, 40.0, 60.0));
+        }
+        assert!(has(&ev, |x| matches!(x, Event::HogFound { .. })), "{ev:?}");
+        assert!(e.provider().gn(2) > 0, "the session was lowered");
+        assert_eq!(e.provider().gn(3), 0, "another session is left alone");
+    }
+
+    #[test]
+    fn short_lived_children_count_through_their_parent() {
+        // The parent barely runs; the children it waits for use 90 % of a core.
+        let mut e = engine(auto_cfg(), many_small_scene());
+        let (mut t, mut ev) = (0, vec![]);
+        for _ in 0..10 {
+            burn(&mut e, &[], 0.0, Some((13, 90.0)));
+            ev.extend(second(&mut e, &mut t, 60.0, 40.0, 60.0));
+        }
+        assert!(
+            has(&ev, |x| matches!(x, Event::HogFound { pid: 13, .. })),
+            "{ev:?}"
+        );
+        assert!(e.provider().gn(2) > 0);
+    }
+
+    #[test]
+    fn the_same_work_is_not_counted_twice() {
+        // Children seen alive (own ticks) and later through the parent (waited-for ticks)
+        // are one piece of work: 40 % of a core, below the bar of 60.
+        let mut e = engine(auto_cfg(), many_small_scene());
+        let (mut t, mut ev) = (0, vec![]);
+        for _ in 0..10 {
+            burn(&mut e, &[10], 40.0, Some((13, 40.0)));
+            ev.extend(second(&mut e, &mut t, 60.0, 40.0, 60.0));
+        }
+        assert!(!has(&ev, |x| matches!(x, Event::HogFound { .. })), "{ev:?}");
+        assert_eq!(e.provider().gn(2), 0);
+    }
+
+    #[test]
+    fn a_session_that_holds_the_foreground_is_never_judged() {
+        let mut m = many_small_scene();
+        m.procs.iter_mut().find(|p| p.pid == 10).unwrap().autogroup = 1; // joins the foreground's session
+        let mut e = engine(auto_cfg(), m);
+        let (mut t, mut ev) = (0, vec![]);
+        for _ in 0..10 {
+            burn(&mut e, &[10, 11, 12], 50.0, None);
+            ev.extend(second(&mut e, &mut t, 60.0, 40.0, 60.0));
+        }
+        assert_eq!(
+            e.provider().gn(1),
+            0,
+            "the foreground's session stays untouched"
+        );
     }
 
     #[test]
