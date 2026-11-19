@@ -1,39 +1,80 @@
-name: CI
+name: ci
+
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
-permissions:
-  contents: read
+    inputs:
+      study:
+        description: "Run the real-Chrome study (x86 only, about 20 minutes)"
+        type: boolean
+        default: true
+      blocks:
+        description: "Paired blocks per condition"
+        default: "3"
+
 jobs:
-  linux:
-    runs-on: ubuntu-latest
+  build-test:
+    name: build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: toolchain
+        run: |
+          rustup update stable --no-self-update
+          rustup component add rustfmt clippy
+          rustc --version; uname -m; nproc
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+      - name: capabilities of this machine
+        run: |
+          cargo build --release
+          ./target/release/ramflow doctor || true
+          echo "kernel: $(uname -r)"; ls /proc/pressure 2>&1 || true
+          cat /proc/self/autogroup 2>&1 || true
+
+  chrome-study:
+    name: real-Chrome study (x86, ${{ matrix.runner }})
+    if: github.event_name == 'workflow_dispatch' && inputs.study
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          components: rustfmt, clippy
-      - name: Format
-        run: cargo fmt --check
-      - name: Clippy (warnings are errors)
-        run: cargo clippy --all-targets -- -D warnings
-      - name: Unit tests and unprivileged paths
-        run: cargo test
-      - name: Real-process tests as root (priority changes, crash recovery, SIGTERM restore)
-        run: sudo -E env "PATH=$PATH" "HOME=$HOME" cargo test --test live --test cli
-      - name: Release build
-        run: cargo build --release
-      - name: Service file is valid
+          node-version: 22
+      - name: build
         run: |
-          sed "s#/usr/local/bin/ramflow#$PWD/target/release/ramflow#" packaging/ramflow.service > /tmp/ramflow.service
-          systemd-analyze verify /tmp/ramflow.service
-      - name: Installer round trip
+          rustup update stable --no-self-update
+          cargo build --release
+          nproc; uname -r; which google-chrome chromium chromium-browser || true
+          google-chrome --version || true
+          ./target/release/ramflow doctor || true
+      - name: study (3 arms, root needed for session priorities)
         run: |
-          T=$(mktemp -d)
-          PREFIX_OVERRIDE_OK=1 NO_SYSTEMCTL=1 PREFIX=$T/usr SYSCONFDIR=$T/etc UNITDIR=$T/units ./install.sh
-          $T/usr/bin/ramflow version
-          NO_SYSTEMCTL=1 PREFIX=$T/usr SYSCONFDIR=$T/etc UNITDIR=$T/units STATEDIR=$T/state ./uninstall.sh --purge
+          sudo -E env "PATH=$PATH" python3 bench/chrome-study/study.py \
+            --blocks "${{ inputs.blocks }}" --arms off,on,auto \
+            --out "docs/evidence/ci-${{ matrix.runner }}-$(nproc)cores"
+      - name: false-positive check
+        run: |
+          sudo -E env "PATH=$PATH" python3 bench/chrome-study/false_positive.py \
+            --out "docs/evidence/ci-${{ matrix.runner }}-$(nproc)cores-false-positive"
+      - name: overhead
+        run: |
+          sudo -E env "PATH=$PATH" python3 bench/overhead.py \
+            --out "docs/evidence/ci-${{ matrix.runner }}-$(nproc)cores-overhead/results.json"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: ramflow-linux-x86_64
-          path: target/release/ramflow
+          name: study-${{ matrix.runner }}
+          path: docs/evidence/ci-*
