@@ -35,6 +35,10 @@ pub trait Provider {
     /// (autogroup id, autogroup nice) of the session `pid` belongs to; `None` when the kernel
     /// has no (enabled) autogroup.
     fn autogroup(&self, pid: i32) -> Option<(u64, i32)>;
+    /// Whether the kernel's CPU cgroup supersedes this process's autogroup.
+    fn cpu_cgroup_overrides_autogroup(&self, _pid: i32) -> bool {
+        false
+    }
     /// Set the nice value of the whole session `pid` belongs to.
     fn set_autogroup_nice(&mut self, pid: i32, nice: i32) -> io::Result<()>;
     /// Total time (ns) the process's threads spent runnable but waiting for a CPU.
@@ -173,6 +177,10 @@ impl Provider for LinuxProvider {
             return None;
         }
         self.proc.autogroup(pid)
+    }
+
+    fn cpu_cgroup_overrides_autogroup(&self, pid: i32) -> bool {
+        self.proc.cpu_cgroup_overrides_autogroup(pid)
     }
 
     fn set_autogroup_nice(&mut self, pid: i32, nice: i32) -> io::Result<()> {
