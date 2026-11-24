@@ -1031,7 +1031,14 @@ impl<P: Provider> Engine<P> {
                             v
                         }
                     };
-                    safe && self.provider.autogroup(s.pid).is_some()
+                    // Pin existing journaled group actions until release. Do not
+                    // create a group action over an already journaled task.
+                    let scope_ok = self.journal.contains(Key::Group(g))
+                        || (!procs.iter().any(|p| p.autogroup == g
+                            && self.journal.contains(Key::Task(p.identity())))
+                            && (!self.cfg.autogroup_cgroup_guard
+                                || !self.provider.cpu_cgroup_overrides_autogroup(s.pid)));
+                    safe && scope_ok && self.provider.autogroup(s.pid).is_some()
                 };
             if use_group {
                 if !handled_groups.insert(s.autogroup) {
@@ -1333,6 +1340,7 @@ mod tests {
         waits: HashMap<i32, u64>,
         fail_set: bool,
         fail_group_set: bool,
+        cpu_cgroup: bool,
         fail_restore: bool,
         set_calls: Vec<(i32, i32)>,
         group_calls: Vec<(u64, i32)>,
@@ -1415,6 +1423,7 @@ mod tests {
                 waits: HashMap::new(),
                 fail_set: false,
                 fail_group_set: false,
+                cpu_cgroup: false,
                 fail_restore: false,
                 set_calls: vec![],
                 group_calls: vec![],
@@ -1469,6 +1478,9 @@ mod tests {
         fn autogroup(&self, pid: i32) -> Option<(u64, i32)> {
             let g = self.procs.iter().find(|p| p.pid == pid)?.autogroup;
             (g != 0).then(|| (g, self.group_nice[&g]))
+        }
+        fn cpu_cgroup_overrides_autogroup(&self, _pid: i32) -> bool {
+            self.cpu_cgroup
         }
         fn set_autogroup_nice(&mut self, pid: i32, nice: i32) -> io::Result<()> {
             let g = self
@@ -1766,6 +1778,31 @@ mod tests {
         assert!(e.provider().group_calls.is_empty());
         assert_eq!(e.provider().by(10).nice, 10);
         assert_eq!(e.provider().by(77).nice, 0);
+    }
+
+    #[test]
+    fn active_cpu_cgroup_uses_task_control_and_restores() {
+        let mut m = scene(2);
+        m.cpu_cgroup = true;
+        let mut e = engine(cfg(), m);
+        let mut t = 0;
+        run_seconds(&mut e, &mut t, 3, 60.0, 40.0, 60.0);
+        assert!(e.provider().group_calls.is_empty());
+        assert_eq!(e.provider().by(10).nice, 10);
+        assert!(e.journal().contains(Key::Task(e.provider().by(10).identity())));
+        e.restore_everything();
+        assert_eq!(e.provider().by(10).nice, 0);
+    }
+
+    #[test]
+    fn legacy_autogroup_override_is_explicit() {
+        let mut m = scene(2);
+        m.cpu_cgroup = true;
+        let mut e = engine(Config { autogroup_cgroup_guard: false, ..cfg() }, m);
+        let mut t = 0;
+        run_seconds(&mut e, &mut t, 3, 60.0, 40.0, 60.0);
+        assert_eq!(e.provider().gn(2), 10);
+        assert!(e.provider().set_calls.is_empty());
     }
 
     #[test]
