@@ -273,6 +273,41 @@ pub fn parse_pageout_ranges(maps: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// True when a non-root CPU cgroup supersedes scheduler autogroup. For v2, a
+/// non-root ancestor with cpu.weight indicates an active CPU hierarchy.
+/// For v1 the cpu controller membership is explicit. Assumes the normal
+/// host cgroup mount; private namespaces may hide ancestors.
+fn cpu_cgroup_overrides<F: Fn(&std::path::Path) -> bool>(membership: &str, has_weight: F) -> bool {
+    use std::path::{Component, Path};
+    for line in membership.lines() {
+        let mut fields = line.splitn(3, ':');
+        let (Some(id), Some(controllers), Some(raw)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if raw == "/" {
+            continue;
+        }
+        if controllers.split(',').any(|c| c == "cpu") {
+            return true;
+        }
+        if id != "0" || !controllers.is_empty() {
+            continue;
+        }
+        let path = Path::new(raw);
+        if !path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+            return true;
+        }
+        for ancestor in path.ancestors().take_while(|p| *p != Path::new("/")) {
+            if has_weight(ancestor) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Access to a `/proc` tree (the real one, or a fixture directory in tests).
 #[derive(Debug, Clone)]
 pub struct Proc {
@@ -368,6 +403,19 @@ impl Proc {
     /// (autogroup id, autogroup nice) of a process, if the kernel has autogroup enabled.
     pub fn autogroup(&self, pid: i32) -> Option<(u64, i32)> {
         parse_autogroup(&self.read(&format!("{pid}/autogroup"))?)
+    }
+
+    /// Whether a process's CPU cgroup overrides autogroup on a standard Linux host.
+    pub fn cpu_cgroup_overrides_autogroup(&self, pid: i32) -> bool {
+        let Some(membership) = self.read(&format!("{pid}/cgroup")) else {
+            return true;
+        };
+        cpu_cgroup_overrides(&membership, |p| {
+            PathBuf::from("/sys/fs/cgroup")
+                .join(p.strip_prefix("/").unwrap_or(p))
+                .join("cpu.weight")
+                .is_file()
+        })
     }
 
     /// Total time (ns) all threads of `pid` spent runnable-but-waiting for a CPU.
@@ -512,6 +560,22 @@ mod tests {
         assert_eq!(parse_autogroup(""), None);
         assert_eq!(parse_autogroup("/autogroup-x nice 0"), None);
         assert_eq!(parse_autogroup("nonsense"), None);
+    }
+
+    #[test]
+    fn cpu_cgroup_membership_distinguishes_root_and_active_ancestors() {
+        use std::path::Path;
+        let active = |p: &Path| p == Path::new("/user.slice");
+        assert!(!cpu_cgroup_overrides("0::/\n", active));
+        assert!(cpu_cgroup_overrides(
+            "0::/user.slice/session.scope\n",
+            active
+        ));
+        assert!(!cpu_cgroup_overrides("0::/other.slice\n", active));
+        assert!(cpu_cgroup_overrides("2:cpu,cpuacct:/work\n", active));
+        assert!(!cpu_cgroup_overrides("2:cpu,cpuacct:/\n", active));
+        assert!(!cpu_cgroup_overrides("2:memory:/work\n", active));
+        assert!(cpu_cgroup_overrides("0::/../outside\n", active));
     }
 
     #[test]

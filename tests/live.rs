@@ -73,6 +73,9 @@ impl Provider for Forced {
     fn autogroup(&self, pid: i32) -> Option<(u64, i32)> {
         self.inner.autogroup(pid)
     }
+    fn cpu_cgroup_overrides_autogroup(&self, pid: i32) -> bool {
+        self.inner.cpu_cgroup_overrides_autogroup(pid)
+    }
     fn set_autogroup_nice(&mut self, pid: i32, nice: i32) -> io::Result<()> {
         self.inner.set_autogroup_nice(pid, nice)
     }
@@ -243,7 +246,10 @@ fn a_job_in_another_session_is_lowered_as_a_session_and_given_back() {
     let target = spawn_python_session(THREADED_SLEEPER);
     wait_for_threads(target.pid(), 4);
     let state = tmpdir("live2g");
-    let cfg = cfg_for(&target.comm, &state);
+    let cfg = Config {
+        autogroup_cgroup_guard: false,
+        ..cfg_for(&target.comm, &state)
+    };
     assert_eq!(autogroup_nice(target.pid()), Some(0));
 
     let mut e = engine_for(&cfg, Some(fg.pid()));
@@ -320,7 +326,10 @@ fn a_session_is_recovered_after_a_crash_too() {
     let target = spawn_python_session(THREADED_SLEEPER);
     wait_for_threads(target.pid(), 4);
     let state = tmpdir("live2h");
-    let cfg = cfg_for(&target.comm, &state);
+    let cfg = Config {
+        autogroup_cgroup_guard: false,
+        ..cfg_for(&target.comm, &state)
+    };
     let mut first = engine_for(&cfg, Some(fg.pid()));
     let mut t = 0;
     seconds(&mut first, &mut t, 3, 70.0, 70.0);

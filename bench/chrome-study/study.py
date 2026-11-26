@@ -11,6 +11,8 @@ Arms:  off   RamFlow not running
        on    RamFlow with the background jobs listed (yield = comm:...)
        auto  RamFlow with auto = true and no list at all (default thresholds: 35 % of a core for 5 s)
        auto15 like auto, but a program counts as a hog from 15 % of a core
+       auto_group legacy autogroup (bypass cgroup guard); auto_task per-thread nice only
+       auto uses the cgroup-aware default
 
 Per condition: 12 s stabilization (the foreground is busy), 5 unreported warm-ups, 1 s wait,
 then 30 searches + 30 sorts, 150 ms apart. p95 per block; median over blocks is reported.
@@ -36,6 +38,8 @@ ap.add_argument("--threads", type=int, default=2, help="threads per background p
 args = ap.parse_args()
 BIN = os.path.abspath(args.bin)
 ARMS = args.arms.split(",")
+if len(set(ARMS)) != len(ARMS) or "off" not in ARMS or any(a not in {"off", "on", "auto", "auto15", "auto_group", "auto_task"} for a in ARMS):
+    ap.error("unique valid arms, including off, are required")
 NBG, THREADS = args.bg, args.threads
 PY = os.path.realpath(shutil.which("python3"))
 CHROME = shutil.which("google-chrome") or shutil.which("chromium")
@@ -187,7 +191,11 @@ def run_condition(tmp, arm, block, chrome_pid, bg, seed, cond_tag):
         with open(conf, "w") as f:
             f.write("dry_run = false\ninterval_ms = 500\nconfirm = 2\n")
             f.write(f"foreground_cmd = echo {chrome_pid}\n")
-            if arm in ("auto", "auto15"):
+            if arm == "auto_group":
+                f.write("autogroup_cgroup_guard = false\n")
+            elif arm == "auto_task":
+                f.write("use_autogroup = false\n")
+            if arm in ("auto", "auto15", "auto_group", "auto_task"):
                 f.write("auto = true\nauto_min_uid = 0\n")
                 if arm == "auto15":
                     f.write("auto_hog_cpu = 15\n")
@@ -244,6 +252,20 @@ def main():
     tmp = tempfile.mkdtemp(prefix="rf-chrome-")
     rng = random.Random(args.seed)
     trials, meta = [], {}
+    def read_optional(path):
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except OSError:
+            return None
+    meta["harness_cgroup"] = read_optional("/proc/self/cgroup")
+    meta["cgroup_controllers"] = read_optional("/sys/fs/cgroup/cgroup.controllers")
+    meta["cgroup_subtree_control"] = read_optional("/sys/fs/cgroup/cgroup.subtree_control")
+    meta["schedstats"] = read_optional("/proc/sys/kernel/sched_schedstats")
+    meta["autogroup"] = read_optional("/proc/sys/kernel/sched_autogroup_enabled")
+    meta["git_commit"] = subprocess.run(["git", "-C", HERE, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    meta["node"] = subprocess.run(["node", "--version"], capture_output=True, text=True).stdout.strip()
+    meta["memberships"] = []
     raw = []
     try:
         for block in range(1, args.blocks + 1):
@@ -252,11 +274,13 @@ def main():
             chrome, chrome_pid, version = start_chrome(tmp, f"b{block}")
             meta["chrome"] = version
             bg = Background(tmp, f"b{block}", args.layout)
+            meta["memberships"].append({"block": block, "chrome": read_optional(f"/proc/{chrome_pid}/cgroup"),
+                                        "background": [read_optional(f"/proc/{p.pid}/cgroup") for p in bg.procs]})
             time.sleep(6)  # background settles, Chrome idle
             print(f"block {block}: order {order}, chrome pid {chrome_pid}", flush=True)
             for arm in order:
                 r = run_condition(tmp, arm, block, chrome_pid, bg, args.seed + block, f"{block}{arm}")
-                raw.append({"block": block, "arm": arm, **r})
+                raw.append({"block": block, "arm": arm, "order": order, **r})
                 for metric in ("search", "sort"):
                     xs = r[metric]
                     trials.append({"block": block, "condition": arm, "metric": metric, "p50Ms": statistics.median(xs),
@@ -284,7 +308,7 @@ def main():
                             "load": args.load, "background": f"{NBG} processes x {THREADS} threads, SHA-256 over 64 KiB, "
                                           + ("each in its own session" if args.layout == "scattered" else "same session as the harness")},
                "environment": {"kernel": platform.release(), "cores": os.cpu_count(), "chrome": meta.get("chrome"),
-                               "ramflow": subprocess.run([BIN, "version"], capture_output=True, text=True).stdout.strip()},
+                               "ramflow": subprocess.run([BIN, "version"], capture_output=True, text=True).stdout.strip(), **meta},
                "features": {}, "background": {}, "integrity": {}}
     for metric in ("search", "sort"):
         off = block_p95("off", metric)
@@ -312,7 +336,7 @@ def main():
         "no_effect_withdrawals": sum(r["events"].get("no_effect", 0) for r in raw if r["events"]),
     }
     with open(os.path.join(args.out, "trials.csv"), "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(trials[0].keys()))
+        w = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for trial in trials for k in trial)))
         w.writeheader(); w.writerows(trials)
     json.dump(summary, open(os.path.join(args.out, "summary.json"), "w"), indent=1, ensure_ascii=False)
     json.dump(raw, open(os.path.join(args.out, "raw.json"), "w"))

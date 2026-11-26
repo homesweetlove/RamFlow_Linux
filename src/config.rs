@@ -81,6 +81,8 @@ pub struct Config {
     /// different session than the foreground. Per-process nice alone has little effect across
     /// sessions on kernels with autogroup.
     pub use_autogroup: bool,
+    /// Prefer task control where a non-root CPU cgroup supersedes autogroup.
+    pub autogroup_cgroup_guard: bool,
     /// Find CPU hogs automatically instead of relying only on `yield`.
     pub auto: bool,
     /// A process is a hog above this share of one core (percent) …
@@ -135,6 +137,7 @@ impl Default for Config {
             protect: Vec::new(),
             nice_target: 19,
             use_autogroup: true,
+            autogroup_cgroup_guard: true,
             auto: false,
             auto_hog_cpu: 35.0,
             auto_hog_cpu_busy: 15.0,
@@ -246,6 +249,13 @@ impl Config {
                     c.use_autogroup = parse_bool(value).ok_or_else(|| {
                         err(format!(
                             "use_autogroup: true/false 가 필요합니다 ('{value}')"
+                        ))
+                    })?
+                }
+                "autogroup_cgroup_guard" => {
+                    c.autogroup_cgroup_guard = parse_bool(value).ok_or_else(|| {
+                        err(format!(
+                            "autogroup_cgroup_guard: true/false 가 필요합니다 ('{value}')"
                         ))
                     })?
                 }
@@ -378,6 +388,12 @@ mod tests {
         assert!(!c.trim_idle, "trimming must be opt-in");
         assert!(!c.auto, "automatic hog detection must be opt-in");
         assert!(c.use_autogroup);
+        assert!(c.autogroup_cgroup_guard);
+        assert!(
+            !Config::parse("autogroup_cgroup_guard = false")
+                .unwrap()
+                .autogroup_cgroup_guard
+        );
     }
 
     #[test]
