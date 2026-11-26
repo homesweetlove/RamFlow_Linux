@@ -45,7 +45,7 @@ The original archive is named `ramflow-full-study.tar.gz` (984 regular files, 16
 SHA-256 of the original archive:
 `558d9274cb3d3628688eb8ff37ea86f80b28a5a9428340c9701b93ddbe41092d`
 
-The binary archive is to be committed separately; this report alone is not the raw dataset. Retain synthetic process labels, PIDs, cgroup paths and measurement values for reproducibility. The archive was screened for obvious home paths, IP addresses, email addresses, VM hostname and credential keywords; none were found. This is not a guarantee of exhaustive anonymization.
+The raw dataset is available in this directory: [ramflow-full-study.tar.gz](ramflow-full-study.tar.gz). Retain synthetic process labels, PIDs, cgroup paths and measurement values for reproducibility. The archive was screened for obvious home paths, IP addresses, email addresses, VM hostname and credential keywords; none were found. This is not a guarantee of exhaustive anonymization.
 
 ## Reproduction
 
