@@ -567,7 +567,10 @@ mod tests {
         use std::path::Path;
         let active = |p: &Path| p == Path::new("/user.slice");
         assert!(!cpu_cgroup_overrides("0::/\n", active));
-        assert!(cpu_cgroup_overrides("0::/user.slice/session.scope\n", active));
+        assert!(cpu_cgroup_overrides(
+            "0::/user.slice/session.scope\n",
+            active
+        ));
         assert!(!cpu_cgroup_overrides("0::/other.slice\n", active));
         assert!(cpu_cgroup_overrides("2:cpu,cpuacct:/work\n", active));
         assert!(!cpu_cgroup_overrides("2:cpu,cpuacct:/\n", active));

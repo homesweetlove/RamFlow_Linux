@@ -1034,10 +1034,10 @@ impl<P: Provider> Engine<P> {
                     // Pin existing journaled group actions until release. Do not
                     // create a group action over an already journaled task.
                     let scope_ok = self.journal.contains(Key::Group(g))
-                        || (!procs.iter().any(|p| p.autogroup == g
-                            && self.journal.contains(Key::Task(p.identity())))
-                            && (!self.cfg.autogroup_cgroup_guard
-                                || !self.provider.cpu_cgroup_overrides_autogroup(s.pid)));
+                        || (!procs.iter().any(|p| {
+                            p.autogroup == g && self.journal.contains(Key::Task(p.identity()))
+                        }) && (!self.cfg.autogroup_cgroup_guard
+                            || !self.provider.cpu_cgroup_overrides_autogroup(s.pid)));
                     safe && scope_ok && self.provider.autogroup(s.pid).is_some()
                 };
             if use_group {
@@ -1789,7 +1789,9 @@ mod tests {
         run_seconds(&mut e, &mut t, 3, 60.0, 40.0, 60.0);
         assert!(e.provider().group_calls.is_empty());
         assert_eq!(e.provider().by(10).nice, 10);
-        assert!(e.journal().contains(Key::Task(e.provider().by(10).identity())));
+        assert!(e
+            .journal()
+            .contains(Key::Task(e.provider().by(10).identity())));
         e.restore_everything();
         assert_eq!(e.provider().by(10).nice, 0);
     }
@@ -1798,7 +1800,13 @@ mod tests {
     fn legacy_autogroup_override_is_explicit() {
         let mut m = scene(2);
         m.cpu_cgroup = true;
-        let mut e = engine(Config { autogroup_cgroup_guard: false, ..cfg() }, m);
+        let mut e = engine(
+            Config {
+                autogroup_cgroup_guard: false,
+                ..cfg()
+            },
+            m,
+        );
         let mut t = 0;
         run_seconds(&mut e, &mut t, 3, 60.0, 40.0, 60.0);
         assert_eq!(e.provider().gn(2), 10);

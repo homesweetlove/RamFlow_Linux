@@ -254,7 +254,9 @@ impl Config {
                 }
                 "autogroup_cgroup_guard" => {
                     c.autogroup_cgroup_guard = parse_bool(value).ok_or_else(|| {
-                        err(format!("autogroup_cgroup_guard: true/false 가 필요합니다 ('{value}')"))
+                        err(format!(
+                            "autogroup_cgroup_guard: true/false 가 필요합니다 ('{value}')"
+                        ))
                     })?
                 }
                 "auto" => {
@@ -387,7 +389,11 @@ mod tests {
         assert!(!c.auto, "automatic hog detection must be opt-in");
         assert!(c.use_autogroup);
         assert!(c.autogroup_cgroup_guard);
-        assert!(!Config::parse("autogroup_cgroup_guard = false").unwrap().autogroup_cgroup_guard);
+        assert!(
+            !Config::parse("autogroup_cgroup_guard = false")
+                .unwrap()
+                .autogroup_cgroup_guard
+        );
     }
 
     #[test]
