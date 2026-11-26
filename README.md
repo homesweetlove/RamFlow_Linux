@@ -96,6 +96,8 @@ Memory trouble alone never lowers any priority: there is no evidence that nice h
 
 ## Does it actually help?
 
+**New research evidence (2026-11-26):** [Cgroup-aware scheduling scalability study](docs/evidence/2026-11-26-cgroup-scaling/README.md) — 2–8 vCPUs, 8 environments, 38,400 operation measurements. Results correspond to the research revision linked in the report.
+
 [`scripts/latency-bench.py`](scripts/latency-bench.py) runs a **victim** (a CPU-bound Python process standing in
 for "the program you work in") against 4 CPU-bound **culprits** (2× the cores), with real processes and the real
 daemon, nothing simulated. Four arms — *none*, *task* (single processes only), *group* (whole sessions, the
